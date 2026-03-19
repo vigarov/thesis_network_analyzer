@@ -1,0 +1,3 @@
+[console_scripts]
+compute = compute_results.run_simulation:main
+plot = visualize_webapp.app:main

@@ -1,0 +1,8 @@
+dash>=4.0.0
+matplotlib>=3.10.8
+numpy>=2.4.3
+plotly>=6.6.0
+torch>=2.9.1
+torch-shampoo
+torchvision>=0.24.1
+tqdm>=4.67.3

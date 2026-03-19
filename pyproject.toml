@@ -1,0 +1,59 @@
+[project]
+name = "network-analyzer"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "dash>=4.0.0",
+    "matplotlib>=3.10.8",
+    "numpy>=2.4.3",
+    "plotly>=6.6.0",
+    "torch>=2.9.1",
+    "torch-shampoo",
+    "torchvision>=0.24.1",
+    "tqdm>=4.67.3",
+]
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+torch = [
+  { index = "pytorch-cu130", marker = "sys_platform == 'linux'" },
+]
+torchvision = [
+  { index = "pytorch-cu130", marker = "sys_platform == 'linux'" },
+]
+torch-shampoo = { git = "https://github.com/facebookresearch/optimizers.git" }
+
+[project.scripts]
+compute = "compute_results.run_simulation:main"
+plot = "visualize_webapp.app:main"
+
+[tool.uv]
+package = true
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = [
+  "compute_results*",
+  "experiments*",
+  "models*",
+  "optimizers*",
+  "visualize_webapp*",
+]
+
+[tool.basedpyright]
+extraPaths = ["."]

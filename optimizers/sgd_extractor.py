@@ -1,0 +1,46 @@
+"""SGD optimizer signal extractor.
+
+Per-unit signals:
+- grad_norm: L2 norm of the gradient for each unit's incoming weights.
+- grad_cosine_sim: cosine similarity between current and previous gradient.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+import torch
+from torch import nn
+
+from optimizers.base import OptimizerSignalExtractor, register_extractor
+
+
+@register_extractor
+class SGDExtractor(OptimizerSignalExtractor):
+
+    def __init__(self, lr: float = 1e-3, momentum: float = 0.0):
+        super().__init__()
+        self.lr = lr
+        self.momentum = momentum
+
+    def optimizer_id(self) -> str:
+        return f"sgd_lr{self.lr}"
+
+    def optimizer_config(self) -> dict[str, Any]:
+        return {"type": "sgd", "lr": self.lr, "momentum": self.momentum}
+
+    def create_optimizer(self, params) -> torch.optim.Optimizer:
+        return torch.optim.SGD(params, lr=self.lr, momentum=self.momentum)
+
+    def signal_names(self) -> list[str]:
+        return ["grad_norm", "grad_cosine_sim"]
+
+    def on_before_step(
+        self, model: nn.Module, optimizer: torch.optim.Optimizer,
+    ) -> dict[str, dict[str, float]]:
+        return self._compute_grad_signals(model)
+
+    def on_after_step(
+        self, model: nn.Module, optimizer: torch.optim.Optimizer,
+    ) -> dict[str, dict[str, float]]:
+        return {}

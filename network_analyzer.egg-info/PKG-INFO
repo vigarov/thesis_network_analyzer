@@ -1,0 +1,170 @@
+Metadata-Version: 2.4
+Name: network-analyzer
+Version: 0.1.0
+Summary: Add your description here
+Requires-Python: >=3.12
+Description-Content-Type: text/markdown
+Requires-Dist: dash>=4.0.0
+Requires-Dist: matplotlib>=3.10.8
+Requires-Dist: numpy>=2.4.3
+Requires-Dist: plotly>=6.6.0
+Requires-Dist: torch>=2.9.1
+Requires-Dist: torch-shampoo
+Requires-Dist: torchvision>=0.24.1
+Requires-Dist: tqdm>=4.67.3
+
+# Network Analyzer
+
+A framework for analyzing neuron and synapse behavior in neural networks under different training setups. For a given experiment (dataset split + continual digits schedule), model architecture, and optimizer, it tracks:
+
+- **Weight evolution** over training (per-neuron incoming weights for DNNs; per-channel kernel weights for CNNs)
+- **Neuron activations** over training (captured via forward hooks at checkpoints)
+- **Optimizer-tied signals** (gradient magnitude, moment metrics for SGD/Adam/AdaGrad)
+- **Dataset metrics** (loss, validation/test accuracy per stage, digit-subset accuracy)
+
+Results are stored in a structured `results/` hierarchy. A config guard prevents incompatible reruns when outputs already exist (unless `--force` is used).
+
+## Prerequisites
+
+- [uv](https://docs.astral.sh/uv/) for dependency management
+- Python 3.12+
+
+## Setup
+
+From the project root:
+
+```bash
+uv sync
+```
+
+## Step 1: Run Training Simulations
+
+Train models and compute metrics. Results are written to `results/<experiment_id>/<model_id>/`.
+
+### From a config file
+
+```bash
+uv run run-simulation --config path/to/config.json
+```
+
+### With explicit arguments
+
+```bash
+uv run run-simulation \
+    --experiment DigitAThenDigitB_75_25 \
+    --digitA 1 --digitB 2 \
+    --model DNN5Hidden64 \
+    --optimizer sgd \
+    --stage-epochs 3 --base-lr 1e-3 --batch-size 1 --seed 3003
+```
+
+### Quick smoke test (1 epoch per stage)
+
+```bash
+uv run run-simulation \
+    --experiment DigitAThenDigitB_75_25 \
+    --digitA 1 --digitB 2 \
+    --model DNN5Hidden64 \
+    --optimizer sgd \
+    --stage-epochs 1
+```
+
+Add `--force` to overwrite existing incompatible configs.
+
+### Available options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--experiment` | N/A | Experiment class: `DigitAThenDigitB_75_25`, `Pretrain25ThenDigitAThenDigitB_25_75` |
+| `--model` | N/A | Model class: `DNN5Hidden64`, `CNN3ConvK5Out64FC64` |
+| `--optimizer` | N/A | Optimizer: `sgd`, `adam`, `adagrad` |
+| `--digitA` | 1 | First digit for continual learning |
+| `--digitB` | 2 | Second digit for continual learning |
+| `--stage-epochs` | 3 | Epochs per training stage |
+| `--base-lr` | 1e-3 | Base learning rate |
+| `--batch-size` | 1 | Batch size |
+| `--seed` | 3003 | Random seed |
+| `--activation` | relu | Activation function |
+| `--checkpoint-cadence` | every_epoch | When to save checkpoints |
+| `--device` | cuda/cpu | Device for training |
+
+## Step 2: Visualize Results
+
+Launch the interactive Dash + Plotly webapp:
+
+```bash
+uv run network-analyzer-webapp
+```
+
+Then open http://localhost:8050 in your browser.
+
+The UI lets you:
+
+- Select **experiment** and **model** from dropdowns
+- View loss evolution and accuracy over epochs (multiple traces per optimizer)
+- Select an **optimizer** for neuron-level metrics
+- Click nodes in the model diagram to see neuron-specific detail graphs (activations, weight evolution, optimizer-specific signals)
+
+## Sample config.json
+
+```json
+{
+  "experiment_class": "DigitAThenDigitB_75_25",
+  "experiment_config": {
+    "digitA": 1,
+    "digitB": 2
+  },
+  "model_class": "DNN5Hidden64",
+  "model_config": {
+    "activation": "relu"
+  },
+  "optimizer": "adam",
+  "stage_epochs": 3,
+  "base_lr": 0.001,
+  "batch_size": 1,
+  "seed": 3003,
+  "activation": "relu",
+  "checkpoint_cadence": "every_epoch"
+}
+```
+
+For the pretrain experiment:
+
+```json
+{
+  "experiment_class": "Pretrain25ThenDigitAThenDigitB_25_75",
+  "experiment_config": {
+    "digitA": 1,
+    "digitB": 2
+  },
+  "model_class": "CNN3ConvK5Out64FC64",
+  "model_config": {
+    "activation": "relu"
+  },
+  "optimizer": "adagrad",
+  "stage_epochs": 3,
+  "base_lr": 0.001,
+  "batch_size": 1,
+  "seed": 3003,
+  "activation": "relu",
+  "checkpoint_cadence": "every_epoch"
+}
+```
+
+## Project layout
+
+```
+network_analyzer/
+├── compute_results/       # Training pipeline
+│   ├── run_simulation.py # Main entrypoint
+│   ├── config_guard.py   # Config comparison & fingerprinting
+│   ├── training_loop.py  # Training + hooks
+│   └── checkpoint.py     # Checkpoint saving & neuron extraction
+├── experiments/          # Experiment definitions (MNIST continual)
+│   └── mnist/
+├── models/               # DNN and CNN architectures
+├── optimizers/           # Optimizer signal extractors (SGD, Adam, AdaGrad)
+├── results/              # Output directory (created by runs)
+└── visualize_webapp/     # Dash + Plotly UI
+    └── app.py
+```

@@ -1,0 +1,242 @@
+:root {
+  --bg: #f4f1ec;
+  --bg-card: #ffffff;
+  --bg-hover: #eae6df;
+  --fg: #1c1917;
+  --fg-muted: #78716c;
+  --accent: #b45309;
+  --accent-soft: rgba(180, 83, 9, 0.08);
+  --border: #d6d3d1;
+  --radius: 8px;
+  --font: 'Space Grotesk', sans-serif;
+}
+
+*,
+*::before,
+*::after {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--font);
+  font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+.app-shell {
+  max-width: 100%;
+  padding: 0 28px 48px;
+}
+
+/* -- Header ---------------------------------------------------------------- */
+
+.app-header {
+  padding: 36px 0 22px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 28px;
+}
+
+.app-header h1 {
+  font-size: 1.8rem;
+  font-weight: 700;
+  letter-spacing: -0.025em;
+  color: var(--fg);
+}
+
+.subtitle {
+  font-size: 0.88rem;
+  color: var(--fg-muted);
+  margin-top: 4px;
+}
+
+/* -- Controls -------------------------------------------------------------- */
+
+.controls-row {
+  display: flex;
+  gap: 16px;
+  margin-bottom: 22px;
+  flex-wrap: wrap;
+}
+
+.ctrl {
+  flex: 1 1 220px;
+  max-width: 380px;
+}
+
+.ctrl label {
+  display: block;
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--fg-muted);
+  margin-bottom: 6px;
+}
+
+/* -- Sections -------------------------------------------------------------- */
+
+.section {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 24px;
+  margin-bottom: 24px;
+}
+
+.section h2 {
+  font-size: 1.05rem;
+  font-weight: 600;
+  color: var(--accent);
+  margin-bottom: 18px;
+  letter-spacing: -0.01em;
+}
+
+/* -- Graphs ----------------------------------------------------------------- */
+
+.graph-row {
+  display: flex;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.graph-half {
+  flex: 1 1 420px;
+  min-width: 0;
+}
+
+.neuron-detail {
+  margin-top: 16px;
+}
+
+.hint-text {
+  color: var(--fg-muted);
+  font-size: 0.85rem;
+  text-align: center;
+  padding: 12px 0;
+}
+
+/* -- Dash dropdown theming ------------------------------------------------- */
+
+.dash-dropdown .Select-control {
+  background: var(--bg) !important;
+  border-color: var(--border) !important;
+  border-radius: var(--radius) !important;
+  height: 38px;
+}
+
+.dash-dropdown .Select-value-label,
+.dash-dropdown .Select-placeholder {
+  color: var(--fg-muted) !important;
+  font-family: var(--font) !important;
+  font-size: 0.88rem !important;
+}
+
+.dash-dropdown .Select.has-value > .Select-control > .Select-value .Select-value-label {
+  color: var(--fg) !important;
+}
+
+.dash-dropdown .Select-input input {
+  color: var(--fg) !important;
+  font-family: var(--font) !important;
+}
+
+.dash-dropdown .Select-menu-outer {
+  background: var(--bg-card) !important;
+  border: 1px solid var(--border) !important;
+  border-radius: 0 0 var(--radius) var(--radius) !important;
+  margin-top: -1px;
+}
+
+.dash-dropdown .VirtualizedSelectOption,
+.dash-dropdown .Select-option {
+  background: var(--bg-card) !important;
+  color: var(--fg) !important;
+  font-family: var(--font) !important;
+  font-size: 0.88rem !important;
+}
+
+.dash-dropdown .VirtualizedSelectFocusedOption,
+.dash-dropdown .Select-option.is-focused {
+  background: var(--bg-hover) !important;
+}
+
+.dash-dropdown .VirtualizedSelectSelectedOption,
+.dash-dropdown .Select-option.is-selected {
+  background: var(--accent-soft) !important;
+  color: var(--accent) !important;
+}
+
+.dash-dropdown .Select-arrow-zone {
+  padding-right: 10px;
+}
+
+.dash-dropdown .Select-arrow {
+  border-color: var(--fg-muted) transparent transparent !important;
+}
+
+.dash-dropdown .Select.is-open .Select-arrow {
+  border-color: transparent transparent var(--fg-muted) !important;
+}
+
+.dash-dropdown .Select-clear-zone .Select-clear {
+  color: var(--fg-muted) !important;
+}
+
+/* -- Plotly modebar -------------------------------------------------------- */
+
+.modebar {
+  opacity: 0.3 !important;
+  transition: opacity 0.2s;
+}
+
+.modebar:hover {
+  opacity: 1 !important;
+}
+
+/* -- Checkpoint slider ----------------------------------------------------- */
+
+.slider-container {
+  padding: 14px 8px 24px;
+  border-top: 1px solid var(--border);
+  margin-top: 4px;
+}
+
+.slider-label {
+  display: block;
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--fg-muted);
+  margin-bottom: 18px;
+}
+
+/* Dash slider track */
+.rc-slider-track {
+  background-color: var(--accent) !important;
+}
+
+.rc-slider-handle {
+  border-color: var(--accent) !important;
+  background-color: var(--bg-card) !important;
+}
+
+.rc-slider-handle:hover,
+.rc-slider-handle:focus {
+  border-color: var(--accent) !important;
+  box-shadow: 0 0 0 4px rgba(180, 83, 9, 0.15) !important;
+}
+
+.rc-slider-dot-active {
+  border-color: var(--accent) !important;
+}
+
+.rc-slider-mark-text {
+  color: var(--fg-muted) !important;
+  font-family: var(--font) !important;
+}
