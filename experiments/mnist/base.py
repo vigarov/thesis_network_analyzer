@@ -18,20 +18,20 @@ from experiments.base import Experiment
 
 
 def digit_indices(
-    dataset: datasets.MNIST,
+    dataset: datasets.MNIST | Subset,
     digits: tuple[int, ...],
 ) -> dict[int, list[int]]:
     """Return ``{digit: [indices]}`` for the requested *digits*."""
     per_digit: dict[int, list[int]] = {d: [] for d in digits}
     for idx in range(len(dataset)):
-        label = int(dataset.targets[idx])
+        label = int(dataset[idx][1])  # type: ignore[union-attr]
         if label in per_digit:
             per_digit[label].append(idx)
     return per_digit
 
 
 def make_loader(
-    dataset: datasets.MNIST,
+    dataset: datasets.MNIST | Subset,
     indices: list[int],
     batch_size: int,
     shuffle: bool = True,
@@ -50,7 +50,7 @@ class MNISTWrapper(Experiment):
     so both train and test sets live in the same feature space.
     """
 
-    def __init__(self, digitA: int = 1, digitB: int = 2):
+    def __init__(self, digitA: int = 1, digitB: int = 2, **kwargs):
         self.digitA = digitA
         self.digitB = digitB
         self._ensure_datasets()
@@ -75,23 +75,33 @@ class MNISTWrapper(Experiment):
             transforms.Normalize((mean,), (std,)),
         ])
 
-        self._train_ds = datasets.MNIST(
+        full_train = datasets.MNIST(
             root="./data", train=True, download=True, transform=tfm,
         )
         self._test_ds = datasets.MNIST(
             root="./data", train=False, download=True, transform=tfm,
         )
 
+        # Eval inputs for activations: last 5 per digit (0-9) from train = 50 samples.
+        all_digits = tuple(range(10))
+        by_digit = digit_indices(full_train, all_digits)
+        eval_indices_list: list[int] = []
+        for d in all_digits:
+            idxs = by_digit[d]
+            eval_indices_list.extend(idxs[-5:])
+        eval_indices_set = frozenset(eval_indices_list)
+        self._eval_ds = Subset(full_train, eval_indices_list)
+
+        # Train dataset excludes eval samples
+        train_indices = [i for i in range(len(full_train)) if i not in eval_indices_set]
+        self._train_ds = Subset(full_train, train_indices)
+
     def evaluation_inputs(
         self, device: torch.device,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        assert self._test_ds is not None
-        by_digit = digit_indices(self._test_ds, self.digits)
-
-        sample_indices: list[int] = []
-        for d in self.digits:
-            sample_indices.extend(by_digit[d][:50])
-
-        images = torch.stack([self._test_ds[i][0] for i in sample_indices])
-        labels = torch.tensor([int(self._test_ds.targets[i]) for i in sample_indices])
+        """Return 50 samples (5 per digit 0-9) from eval_ds for activation capture."""
+        loader = DataLoader(
+            self._eval_ds, batch_size=len(self._eval_ds), shuffle=False,
+        )
+        images, labels = next(iter(loader))
         return images.to(device), labels.to(device)

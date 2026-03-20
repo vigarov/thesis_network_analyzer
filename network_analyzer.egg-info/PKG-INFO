@@ -76,7 +76,7 @@ Add `--force` to overwrite existing incompatible configs.
 | Option | Default | Description |
 |--------|---------|-------------|
 | `--experiment` | N/A | Experiment class: `DigitAThenDigitB_75_25`, `Pretrain25ThenDigitAThenDigitB_25_75` |
-| `--model` | N/A | Model class: `DNN5Hidden64`, `CNN3ConvK5Out64FC64` |
+| `--model` | N/A | Model class: `DNN5Hidden64`, `CNN3ConvK5Out32FC32` |
 | `--optimizer` | N/A | Optimizer: `sgd`, `adam`, `adagrad` |
 | `--digitA` | 1 | First digit for continual learning |
 | `--digitB` | 2 | Second digit for continual learning |
@@ -137,7 +137,7 @@ For the pretrain experiment:
     "digitA": 1,
     "digitB": 2
   },
-  "model_class": "CNN3ConvK5Out64FC64",
+  "model_class": "CNN3ConvK5Out32FC32",
   "model_config": {
     "activation": "relu"
   },

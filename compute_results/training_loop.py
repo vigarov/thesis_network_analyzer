@@ -1,7 +1,4 @@
 """Generic training loop that iterates through experiment stages."""
-
-from __future__ import annotations
-
 from pathlib import Path
 from typing import Any
 
@@ -50,24 +47,24 @@ def evaluate(
 def _run_checkpoint(
     *,
     tag: str,
+    iteration: int,
     model: AnalyzableModel,
     experiment: Experiment,
     device: torch.device,
     checkpoint_dir: Path,
     neuron_collector: NeuronTimeseriesCollector,
-    prev_state: dict[str, torch.Tensor] | None,
     eval_loaders: dict[str, torch.utils.data.DataLoader],
     criterion: nn.Module,
     metrics: dict[str, list],
-) -> dict[str, torch.Tensor]:
+) -> None:
     """Save checkpoint, capture activations, record neuron stats, evaluate."""
     save_model_checkpoint(model, checkpoint_dir, tag)
 
     eval_inputs, _ = experiment.evaluation_inputs(device)
     activations = capture_activations(model, eval_inputs, device)
     act_values = extract_unit_activations(activations, model.clickable_units())
-    norm_values, cos_values = compute_weight_stats(model, prev_state)
-    neuron_collector.record(tag, act_values, norm_values, cos_values)
+    norm_values = compute_weight_stats(model)
+    neuron_collector.record(tag, act_values, norm_values)
 
     for loader_name, loader in eval_loaders.items():
         loss, acc = evaluate(model, loader, device, criterion)
@@ -75,9 +72,7 @@ def _run_checkpoint(
         metrics.setdefault(f"acc_{loader_name}", []).append(acc)
 
     metrics.setdefault("checkpoint_tags", []).append(tag)
-
-    current_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
-    return current_state
+    metrics.setdefault("checkpoint_iterations", []).append(iteration)
 
 
 def train_with_config(
@@ -106,7 +101,7 @@ def train_with_config(
     cadence_mode, cadence_k = parse_checkpoint_cadence(
         config.get("checkpoint_cadence", "every_epoch")
     )
-    disable_cp_turning_point: bool = config.get("disable_cp_turning_point", False)
+    disable_cp_stage_switch: bool = config.get("disable_cp_stage_switch", False)
 
     checkpoint_dir = results_dir / "checkpoints"
     optimizer_dir = results_dir / "optimizers" / extractor.optimizer_id()
@@ -126,33 +121,34 @@ def train_with_config(
     for stage in stages:
         all_eval_loaders.update(stage.eval_loaders)
 
-    prev_state: dict[str, torch.Tensor] | None = None
-
-    prev_state = _run_checkpoint(
+    _run_checkpoint(
         tag="init",
+        iteration=0,
         model=model,
         experiment=experiment,
         device=device,
         checkpoint_dir=checkpoint_dir,
         neuron_collector=neuron_collector,
-        prev_state=prev_state,
         eval_loaders=all_eval_loaders,
         criterion=criterion,
         metrics=metrics,
     )
 
     global_iter = 0
+    stage_names_list: list[str] = []
+    stage_end_checkpoint_idxs: list[int] = []
+    stage_end_iterations_list: list[int] = []
 
     for stage in stages:
-        if stage.is_turning_point and not disable_cp_turning_point:
-            prev_state = _run_checkpoint(
-                tag=f"tp_{stage.name}_entry",
+        if stage.is_stage_switch and not disable_cp_stage_switch:
+            _run_checkpoint(
+                tag=f"sw_{stage.name}_entry",
+                iteration=max(0, global_iter - 1),
                 model=model,
                 experiment=experiment,
                 device=device,
                 checkpoint_dir=checkpoint_dir,
                 neuron_collector=neuron_collector,
-                prev_state=prev_state,
                 eval_loaders=all_eval_loaders,
                 criterion=criterion,
                 metrics=metrics,
@@ -188,28 +184,28 @@ def train_with_config(
 
                 if tp_iters_remaining > 0:
                     tp_iter_idx = 11 - tp_iters_remaining
-                    prev_state = _run_checkpoint(
-                        tag=f"tp_{stage.name}_iter{tp_iter_idx}",
+                    _run_checkpoint(
+                        tag=f"sw_{stage.name}_iter{tp_iter_idx}",
+                        iteration=max(0, global_iter - 1),
                         model=model,
                         experiment=experiment,
                         device=device,
                         checkpoint_dir=checkpoint_dir,
                         neuron_collector=neuron_collector,
-                        prev_state=prev_state,
                         eval_loaders=all_eval_loaders,
                         criterion=criterion,
                         metrics=metrics,
                     )
                     tp_iters_remaining -= 1
                 elif cadence_mode == "every_k_its" and cadence_k is not None and global_iter % cadence_k == 0:
-                    prev_state = _run_checkpoint(
+                    _run_checkpoint(
                         tag=f"iter{global_iter}",
+                        iteration=max(0, global_iter - 1),
                         model=model,
                         experiment=experiment,
                         device=device,
                         checkpoint_dir=checkpoint_dir,
                         neuron_collector=neuron_collector,
-                        prev_state=prev_state,
                         eval_loaders=all_eval_loaders,
                         criterion=criterion,
                         metrics=metrics,
@@ -217,18 +213,38 @@ def train_with_config(
 
             if cadence_mode == "every_epoch":
                 tag = f"{stage.name}_epoch{epoch}"
-                prev_state = _run_checkpoint(
+                _run_checkpoint(
                     tag=tag,
+                    iteration=max(0, global_iter - 1),
                     model=model,
                     experiment=experiment,
                     device=device,
                     checkpoint_dir=checkpoint_dir,
                     neuron_collector=neuron_collector,
-                    prev_state=prev_state,
                     eval_loaders=all_eval_loaders,
                     criterion=criterion,
                     metrics=metrics,
                 )
+
+        if stage.post_stage_callback is not None:
+            stage.post_stage_callback(model)
+            _run_checkpoint(
+                tag=f"{stage.name}_post_callback",
+                iteration=max(0, global_iter - 1),
+                model=model,
+                experiment=experiment,
+                device=device,
+                checkpoint_dir=checkpoint_dir,
+                neuron_collector=neuron_collector,
+                eval_loaders=all_eval_loaders,
+                criterion=criterion,
+                metrics=metrics,
+            )
+
+        # Record stage boundary (last checkpoint index and last iteration of this stage)
+        stage_names_list.append(stage.name)
+        stage_end_checkpoint_idxs.append(len(metrics["checkpoint_tags"]) - 1)
+        stage_end_iterations_list.append(global_iter - 1 if global_iter > 0 else 0)
 
     # --- Save outputs ---
     optimizer_dir.mkdir(parents=True, exist_ok=True)
@@ -238,13 +254,27 @@ def train_with_config(
         "unit_node_ids": np.array(node_ids),
     }
     for s_name, unit_data in signal_log.items():
-        if node_ids and iterations:
+        if not node_ids or not iterations:
+            signal_arrays[s_name] = np.array([])
+            continue
+        # Check if this signal stores arrays (e.g. effective_lr) vs scalars
+        first_val = unit_data[node_ids[0]][0] if unit_data[node_ids[0]] else None
+        if isinstance(first_val, np.ndarray):
+            # Array-valued: save per-unit as s_name__{safe} with shape (n_iters, n_vals)
+            for nid in node_ids:
+                safe = nid.replace(":", "__")
+                try:
+                    signal_arrays[f"{s_name}__{safe}"] = np.stack(unit_data[nid])
+                except (ValueError, TypeError):
+                    signal_arrays[f"{s_name}__{safe}"] = np.array(
+                        unit_data[nid], dtype=object
+                    )
+        else:
+            # Scalar-valued: keep matrix format (n_iters, n_units)
             matrix = np.column_stack(
                 [np.array(unit_data[nid]) for nid in node_ids]
             )
-        else:
-            matrix = np.array([])
-        signal_arrays[s_name] = matrix
+            signal_arrays[s_name] = matrix
     np.savez_compressed(str(optimizer_dir / "signals.npz"), **signal_arrays)
 
     neuron_collector.save(optimizer_dir / "neuron_timeseries.npz")
@@ -255,4 +285,7 @@ def train_with_config(
             metric_arrays[k] = np.array(v)
         except (ValueError, TypeError):
             metric_arrays[k] = np.array(v, dtype=object)
+    metric_arrays["stage_names"] = np.array(stage_names_list, dtype=object)
+    metric_arrays["stage_end_checkpoint_idxs"] = np.array(stage_end_checkpoint_idxs, dtype=np.int64)
+    metric_arrays["stage_end_iterations"] = np.array(stage_end_iterations_list, dtype=np.int64)
     np.savez_compressed(str(optimizer_dir / "training_metrics.npz"), **metric_arrays)

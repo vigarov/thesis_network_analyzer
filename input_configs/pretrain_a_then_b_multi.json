@@ -1,8 +1,9 @@
 {
-    "experiment_class": "DigitAThenDigitB_75_25",
+    "experiment_class": "Pretrain25ThenDigitAThenDigitB_25_75",
     "experiment_config": {
         "digitA": 1,
-        "digitB": 2
+        "digitB": 2,
+        "base_ratio": 0.4
     },
     "model_class": "DNN5Hidden64",
     "model_config": {

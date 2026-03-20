@@ -25,7 +25,9 @@ class AnalyzableModel(nn.Module, abc.ABC):
         """Return a list of unit descriptors for the visualization.
 
         Each descriptor is a dict with at least:
-            - node_id: str  (e.g. "dnn:hidden_0:neuron_3")
+            - node_id: str  (canonical: ``scope|layer_name|unit_type|unit_index`` via
+              :func:`models.unit_node_id.format_unit_node_id`; must parse with
+              :func:`models.unit_node_id.parse_unit_node_id`)
             - layer_name: str
             - unit_index: int
             - unit_type: "neuron" | "channel"

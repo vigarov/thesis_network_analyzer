@@ -12,13 +12,26 @@ from typing import Any
 import torch
 from torch import nn
 
+from compute_results.defaults import (
+    DEFAULT_LR,
+    DEFAULT_SGD_MOMENTUM,
+    OPTIMIZER_LR_KEY,
+    OPTIMIZER_MOMENTUM_KEY,
+    OPTIMIZER_TYPE_KEY,
+)
 from optimizers.base import OptimizerSignalExtractor, register_extractor
 
 
 @register_extractor
 class SGDExtractor(OptimizerSignalExtractor):
 
-    def __init__(self, lr: float = 1e-3, momentum: float = 0.0):
+    def __init__(
+        self,
+        *,
+        lr: float = DEFAULT_LR,
+        momentum: float = DEFAULT_SGD_MOMENTUM,
+        **kwargs: Any,
+    ) -> None:
         super().__init__()
         self.lr = lr
         self.momentum = momentum
@@ -27,7 +40,11 @@ class SGDExtractor(OptimizerSignalExtractor):
         return f"sgd_lr{self.lr}"
 
     def optimizer_config(self) -> dict[str, Any]:
-        return {"type": "sgd", "lr": self.lr, "momentum": self.momentum}
+        return {
+            OPTIMIZER_TYPE_KEY: "sgd",
+            OPTIMIZER_LR_KEY: self.lr,
+            OPTIMIZER_MOMENTUM_KEY: self.momentum,
+        }
 
     def create_optimizer(self, params) -> torch.optim.Optimizer:
         return torch.optim.SGD(params, lr=self.lr, momentum=self.momentum)

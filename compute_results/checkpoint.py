@@ -48,31 +48,27 @@ def capture_activations(
 def extract_unit_activations(
     activations: dict[str, torch.Tensor],
     units: list[dict[str, Any]],
-) -> dict[str, float]:
-    """For each clickable unit, extract a scalar activation summary."""
-    result: dict[str, float] = {}
+) -> dict[str, np.ndarray]:
+    """For each clickable unit, extract all activation values (no reduction)."""
+    result: dict[str, np.ndarray] = {}
     for u in units:
         layer_act = activations.get(u["layer_name"])
         if layer_act is None:
             continue
         idx = u["unit_index"]
         if u["unit_type"] == "neuron":
-            val = layer_act[:, idx].mean().item()
+            val = layer_act[:, idx].detach().cpu().numpy().flatten()
         elif u["unit_type"] == "channel":
-            val = layer_act[:, idx].mean().item()
+            val = layer_act[:, idx].detach().cpu().numpy().flatten()
         else:
             continue
         result[u["node_id"]] = val
     return result
 
 
-def compute_weight_stats(
-    model: AnalyzableModel,
-    prev_state: dict[str, torch.Tensor] | None,
-) -> tuple[dict[str, float], dict[str, float]]:
-    """Compute per-unit weight norm and cosine similarity vs previous checkpoint."""
+def compute_weight_stats(model: AnalyzableModel) -> dict[str, float]:
+    """Compute per-unit weight norms."""
     norms: dict[str, float] = {}
-    cosines: dict[str, float] = {}
 
     current_state = {k: v.detach().cpu() for k, v in model.state_dict().items()}
     units = model.clickable_units()
@@ -94,18 +90,7 @@ def compute_weight_stats(
 
         norms[u["node_id"]] = w_vec.norm().item()
 
-        if prev_state is not None and param_key in prev_state:
-            w_prev = prev_state[param_key]
-            if u["unit_type"] == "neuron":
-                w_prev_vec = w_prev[idx].flatten().float()
-            else:
-                w_prev_vec = w_prev[idx].flatten().float()
-            cos = torch.nn.functional.cosine_similarity(
-                w_vec.unsqueeze(0), w_prev_vec.unsqueeze(0)
-            ).item()
-            cosines[u["node_id"]] = cos
-
-    return norms, cosines
+    return norms
 
 
 def _find_weight_key(
@@ -129,40 +114,32 @@ class NeuronTimeseriesCollector:
     def __init__(self, units: list[dict[str, Any]]):
         self.units = units
         self.checkpoint_tags: list[str] = []
-        self.activations: dict[str, list[float]] = {u["node_id"]: [] for u in units}
+        self.activations: dict[str, list[np.ndarray]] = {u["node_id"]: [] for u in units}
         self.weight_norms: dict[str, list[float]] = {u["node_id"]: [] for u in units}
-        self.weight_cosines: dict[str, list[float]] = {u["node_id"]: [] for u in units}
 
     def record(
         self,
         tag: str,
-        act_values: dict[str, float],
+        act_values: dict[str, np.ndarray],
         norm_values: dict[str, float],
-        cos_values: dict[str, float],
     ) -> None:
         self.checkpoint_tags.append(tag)
         for u in self.units:
             nid = u["node_id"]
-            self.activations[nid].append(act_values.get(nid, float("nan")))
+            self.activations[nid].append(
+                act_values[nid] if nid in act_values else np.array([float("nan")])
+            )
             self.weight_norms[nid].append(norm_values.get(nid, float("nan")))
-            self.weight_cosines[nid].append(cos_values.get(nid, float("nan")))
 
     def save(self, path: Path) -> None:
         data: dict[str, Any] = {
             "checkpoint_tags": np.array(self.checkpoint_tags),
             "unit_node_ids": np.array([u["node_id"] for u in self.units]),
-            "units_meta": np.array(
-                [
-                    f"{u['layer_name']}|{u['unit_index']}|{u['unit_type']}"
-                    for u in self.units
-                ]
-            ),
         }
         for nid in self.activations:
             safe = nid.replace(":", "__")
             data[f"act__{safe}"] = np.array(self.activations[nid])
             data[f"wnorm__{safe}"] = np.array(self.weight_norms[nid])
-            data[f"wcos__{safe}"] = np.array(self.weight_cosines[nid])
 
         path.parent.mkdir(parents=True, exist_ok=True)
         np.savez_compressed(str(path), **data)

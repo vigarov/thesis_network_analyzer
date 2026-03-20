@@ -1,7 +1,7 @@
 """Base class and registry for experiments."""
 import abc
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Callable
 
 import torch
 from torch.utils.data import DataLoader
@@ -14,7 +14,8 @@ class StageSpec:
     name: str
     train_loader: DataLoader
     eval_loaders: dict[str, DataLoader] = field(default_factory=dict)
-    is_turning_point: bool = False
+    is_stage_switch: bool = False
+    post_stage_callback: Callable[..., None] | None = field(default=None, repr=False)
 
 
 class Experiment(abc.ABC):

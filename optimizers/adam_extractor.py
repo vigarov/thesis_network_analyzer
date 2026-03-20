@@ -11,6 +11,15 @@ from typing import Any
 
 import torch
 
+from compute_results.defaults import (
+    DEFAULT_ADAM_BETAS,
+    DEFAULT_ADAM_EPS,
+    DEFAULT_LR,
+    OPTIMIZER_BETAS_KEY,
+    OPTIMIZER_EPS_KEY,
+    OPTIMIZER_LR_KEY,
+    OPTIMIZER_TYPE_KEY,
+)
 from optimizers.base import OptimizerSignalExtractor, register_extractor
 
 
@@ -19,10 +28,12 @@ class AdamExtractor(OptimizerSignalExtractor):
 
     def __init__(
         self,
-        lr: float = 1e-3,
-        betas: tuple[float, float] = (0.9, 0.999),
-        eps: float = 1e-8,
-    ):
+        *,
+        lr: float = DEFAULT_LR,
+        betas: tuple[float, float] = DEFAULT_ADAM_BETAS,
+        eps: float = DEFAULT_ADAM_EPS,
+        **kwargs: Any,
+    ) -> None:
         super().__init__()
         self.lr = lr
         self.betas = betas
@@ -34,10 +45,10 @@ class AdamExtractor(OptimizerSignalExtractor):
 
     def optimizer_config(self) -> dict[str, Any]:
         return {
-            "type": "adam",
-            "lr": self.lr,
-            "betas": list(self.betas),
-            "eps": self.eps,
+            OPTIMIZER_TYPE_KEY: "adam",
+            OPTIMIZER_LR_KEY: self.lr,
+            OPTIMIZER_BETAS_KEY: list(self.betas),
+            OPTIMIZER_EPS_KEY: self.eps,
         }
 
     def create_optimizer(self, params) -> torch.optim.Optimizer:

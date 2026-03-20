@@ -113,6 +113,14 @@ body {
   margin-top: 16px;
 }
 
+.neuron-graph {
+  margin-bottom: 20px;
+}
+
+.neuron-graph:last-child {
+  margin-bottom: 0;
+}
+
 .hint-text {
   color: var(--fg-muted);
   font-size: 0.85rem;
@@ -214,6 +222,41 @@ body {
   letter-spacing: 0.07em;
   color: var(--fg-muted);
   margin-bottom: 18px;
+}
+
+.slider-with-play {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.slider-track-wrap {
+  flex: 1;
+  min-width: 0;
+}
+
+.slider-play-btn {
+  flex-shrink: 0;
+  font-family: var(--font);
+  font-size: 0.8rem;
+  font-weight: 600;
+  padding: 8px 14px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: var(--bg-card);
+  color: var(--fg);
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+
+.slider-play-btn:hover:not(:disabled) {
+  background: var(--bg-hover);
+  border-color: var(--fg-muted);
+}
+
+.slider-play-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 
 /* Dash slider track */

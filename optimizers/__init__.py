@@ -7,6 +7,8 @@ from optimizers.base import (
     register_extractor,
 )
 
-import optimizers.sgd_extractor  # noqa: F401
-import optimizers.adam_extractor  # noqa: F401
-import optimizers.adagrad_extractor  # noqa: F401
+import optimizers.sgd_extractor 
+import optimizers.adam_extractor 
+import optimizers.adagrad_extractor 
+import optimizers.pure_shampoo_extractor 
+import optimizers.grafted_shampoo_extractor 

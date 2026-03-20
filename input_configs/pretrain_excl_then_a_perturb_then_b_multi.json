@@ -1,0 +1,19 @@
+{
+    "experiment_class": "PretrainExclThenDigitAPerturbThenDigitB",
+    "experiment_config": {
+        "digitA": 1,
+        "digitB": 2,
+        "base_ratio": 0.25,
+        "epsilon_perturbation": 0.01
+    },
+    "model_class": "DNN5Hidden64,CNN3ConvK5Out32FC32",
+    "model_config": {
+        "activation": "relu"
+    },
+    "optimizer": "adam,adagrad",
+    "stage_epochs": 1,
+    "base_lr": 0.001,
+    "batch_size": 4,
+    "seed": 3003,
+    "checkpoint_cadence": "50 its"
+}

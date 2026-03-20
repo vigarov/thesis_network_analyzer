@@ -40,14 +40,27 @@ def _split_base_remaining(
 class Pretrain25ThenDigitAThenDigitB_25_75(MNISTWrapper):
     """Three-stage continual learning with a pre-training base."""
 
+    def __init__(
+        self,
+        digitA: int = 1,
+        digitB: int = 2,
+        base_ratio: float = 0.25,
+        **kwargs,
+    ):
+        if not (0 < base_ratio < 1):
+            raise ValueError(f"base_ratio must be in (0, 1), got {base_ratio}")
+        super().__init__(digitA=digitA, digitB=digitB, **kwargs)
+        self.base_ratio = base_ratio
+
     def experiment_id(self) -> str:
-        return f"pretrain25_then_{self.digitA}_then_{self.digitB}_25_75"
+        pct = int(self.base_ratio * 100)
+        return f"pretrain{pct}_then_{self.digitA}_then_{self.digitB}_25_75"
 
     def config_fields(self) -> dict[str, Any]:
         return {
             "digitA": self.digitA,
             "digitB": self.digitB,
-            "base_ratio": 0.25,
+            "base_ratio": self.base_ratio,
         }
 
     def build_stages(self, batch_size: int, seed: int) -> list[StageSpec]:
@@ -55,13 +68,13 @@ class Pretrain25ThenDigitAThenDigitB_25_75(MNISTWrapper):
         test_by_digit = digit_indices(self._test_ds, self.digits)
 
         base_idx, remaining_idx = _split_base_remaining(
-            train_by_digit, base_ratio=self.config_fields()["base_ratio"], seed=seed,
+            train_by_digit, base_ratio=self.base_ratio, seed=seed,
         )
 
-        all_test = test_by_digit[self.digitA] + test_by_digit[self.digitB]
+        both_test = test_by_digit[self.digitA] + test_by_digit[self.digitB]
 
         eval_loaders = {
-            "all_test": make_loader(self._test_ds, all_test, batch_size=256, shuffle=False),
+            "both_test": make_loader(self._test_ds, both_test, batch_size=256, shuffle=False),
             f"digitA_{self.digitA}_test": make_loader(
                 self._test_ds, test_by_digit[self.digitA], batch_size=256, shuffle=False,
             ),
@@ -86,6 +99,6 @@ class Pretrain25ThenDigitAThenDigitB_25_75(MNISTWrapper):
             name=f"stageC_digit{self.digitB}",
             train_loader=make_loader(self._train_ds, remaining_idx[self.digitB], batch_size),
             eval_loaders=eval_loaders,
-            is_turning_point=True,
+            is_stage_switch=True,
         )
         return [stage_a, stage_b, stage_c]

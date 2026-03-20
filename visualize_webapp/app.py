@@ -8,16 +8,14 @@ Run with::
 from __future__ import annotations
 
 import argparse
-import json
 import sys
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import plotly.graph_objects as go
-from dash import Dash, Input, Output, dcc, html, no_update
 from plotly.subplots import make_subplots
-
+from dash import Dash, Input, Output, State, callback_context, dcc, html, no_update
 # -- Paths --------------------------------------------------------------------
 
 _APP_DIR = Path(__file__).resolve().parent
@@ -26,6 +24,8 @@ RESULTS = _PROJECT / "results"
 
 if str(_PROJECT) not in sys.path:
     sys.path.insert(0, str(_PROJECT))
+
+from models.unit_node_id import parse_unit_node_id
 
 # -- Theme (kept in sync with assets/style.css) ------------------------------
 
@@ -45,7 +45,13 @@ C = {
     "orange": "#ea580c",
 }
 
-_OPT_PAL = {"sgd": C["blue"], "adam": C["accent"], "adagrad": C["green"]}
+_OPT_PAL = {
+    "sgd": C["blue"],
+    "adam": C["accent"],
+    "adagrad": C["green"],
+    "pure_shampoo": "#0891b2",
+    "grafted_shampoo": "#c026d3",
+}
 
 
 def _opt_color(oid: str) -> str:
@@ -57,6 +63,26 @@ def _opt_color(oid: str) -> str:
 
 def _opt_label(oid: str) -> str:
     return oid.split("_lr")[0].upper() if "_lr" in oid else oid
+
+
+# Dropdown / plot legend order (unknown families sort last, then by id)
+_OPT_ORDER_PREFIXES = (
+    "sgd",
+    "adagrad",
+    "adam",
+    "pure_shampoo",
+    "grafted_shampoo",
+)
+
+
+def _sort_optimizer_ids(oids: list[str]) -> list[str]:
+    def _key(oid: str) -> tuple[int, str]:
+        for i, prefix in enumerate(_OPT_ORDER_PREFIXES):
+            if oid.startswith(prefix):
+                return (i, oid)
+        return (len(_OPT_ORDER_PREFIXES), oid)
+
+    return sorted(oids, key=_key)
 
 
 # -- Data loading (module-level cache) ----------------------------------------
@@ -84,10 +110,12 @@ def scan_results() -> dict[str, dict[str, list[str]]]:
             opt_base = model_dir / "optimizers"
             if not opt_base.exists():
                 continue
-            oids = sorted(
-                d.name
-                for d in opt_base.iterdir()
-                if d.is_dir() and (d / "training_metrics.npz").exists()
+            oids = _sort_optimizer_ids(
+                [
+                    d.name
+                    for d in opt_base.iterdir()
+                    if d.is_dir() and (d / "training_metrics.npz").exists()
+                ]
             )
             if oids:
                 tree.setdefault(exp_dir.name, {})[model_dir.name] = oids
@@ -124,7 +152,6 @@ def _sigs(e: str, m: str, o: str) -> dict[str, np.ndarray]:
 
 
 def _style(fig: go.Figure, **kw: Any) -> go.Figure:
-    """Apply dark-theme defaults to *fig*.  Keyword args override defaults."""
     defaults: dict[str, Any] = dict(
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(0,0,0,0)",
@@ -210,35 +237,245 @@ def _empty(msg: str = "", h: int = 200) -> go.Figure:
     return fig
 
 
+def _make_dual_y_axes_symmetrical(fig: go.Figure) -> None:
+    """For subplots with two y axes, set each axis range to [-max_abs, max_abs]
+    so that 0 is aligned and both axes are symmetrical about 0."""
+    # Collect y data per axis from traces
+    axis_ys: dict[str, list[np.ndarray]] = {}
+    for trace in fig.data:
+        y = getattr(trace, "y", None)
+        yaxis = getattr(trace, "yaxis", None)
+        if y is None or yaxis is None:
+            continue
+        arr = np.asarray(y)
+        if arr.size == 0 or np.all(np.isnan(arr)):
+            continue
+        axis_ys.setdefault(yaxis, []).append(arr)
+
+    # Find dual-y pairs: either same domain, or one overlays the other
+    layout = fig.layout
+    paired_axes: set[str] = set()
+    axis_pairs: list[tuple[str, str]] = []
+    for i in range(1, 20):
+        key = "yaxis" if i == 1 else f"yaxis{i}"
+        yax = getattr(layout, key, None)
+        if yax is None:
+            break
+        overlaying = getattr(yax, "overlaying", None)
+        if overlaying:
+            # This axis overlays another; overlaying is "y", "y2", etc.
+            other_key = overlaying if overlaying == "yaxis" else f"yaxis{overlaying[1:]}"
+            if overlaying == "y":
+                other_key = "yaxis"
+            else:
+                other_key = f"yaxis{overlaying[1:]}"
+            if key not in paired_axes and other_key not in paired_axes:
+                axis_pairs.append((other_key, key))
+                paired_axes.add(key)
+                paired_axes.add(other_key)
+
+    # Also group by shared domain (for make_subplots that set domain on both)
+    domain_to_axes: dict[tuple[float, float], list[str]] = {}
+    for i in range(1, 20):
+        key = "yaxis" if i == 1 else f"yaxis{i}"
+        yax = getattr(layout, key, None)
+        if yax is None:
+            break
+        if key in paired_axes:
+            continue
+        domain = getattr(yax, "domain", None)
+        if domain and len(domain) == 2:
+            dom_tup = (float(domain[0]), float(domain[1]))
+            domain_to_axes.setdefault(dom_tup, []).append(key)
+
+    def _set_symmetrical_range(ax_key: str) -> None:
+        trace_ref = "y" if ax_key == "yaxis" else ax_key.replace("yaxis", "y")
+        y_arrays = axis_ys.get(trace_ref, [])
+        if not y_arrays:
+            return
+        concat = np.concatenate([np.ravel(a) for a in y_arrays])
+        valid = concat[~np.isnan(concat)]
+        if len(valid) == 0:
+            return
+        max_abs = float(np.max(np.abs(valid)))
+        if max_abs <= 0:
+            max_abs = 1.0
+        layout_update: dict[str, Any] = {ax_key: dict(range=[-max_abs, max_abs])}
+        fig.update_layout(**layout_update)
+
+    for ax1, ax2 in axis_pairs:
+        _set_symmetrical_range(ax1)
+        _set_symmetrical_range(ax2)
+
+    for axes_keys in domain_to_axes.values():
+        if len(axes_keys) < 2:
+            continue
+        for ax_key in axes_keys:
+            _set_symmetrical_range(ax_key)
+
+
+def _stage_boundaries_from_metrics(
+    metrics: dict[str, np.ndarray],
+    x_mode: str,
+) -> tuple[list[str], list[float], bool] | None:
+    """Extract (stage_names, boundary_x_positions, use_iterations) for plotting.
+
+    Returns None if stage data is missing (backward compat with old runs).
+    x_mode: 'checkpoint' or 'iteration'.
+    """
+    names = metrics.get("stage_names")
+    cp_idxs = metrics.get("stage_end_checkpoint_idxs")
+    iters = metrics.get("stage_end_iterations")
+    if names is None or cp_idxs is None:
+        return None
+    names = [str(n) for n in names]
+    if len(names) < 1:
+        return None
+    use_iters = (
+        x_mode == "iteration"
+        and iters is not None
+        and len(iters) == len(names)
+    )
+    boundaries: list[float] = []
+    for i in range(len(names) - 1):
+        if use_iters and iters is not None:
+            boundaries.append(float(iters[i]) + 0.5)
+        elif cp_idxs is not None:
+            boundaries.append(float(cp_idxs[i]) + 0.5)
+    return (names, boundaries, use_iters)
+
+
+def _stage_switch_checkpoint_indices(metrics: dict[str, Any]) -> list[int]:
+    """First checkpoint index of each stage after the first (training enters a new stage)."""
+    names = metrics.get("stage_names")
+    cp_idxs = metrics.get("stage_end_checkpoint_idxs")
+    if names is None or cp_idxs is None:
+        return []
+    n_stages = len(names)
+    if n_stages < 2:
+        return []
+    return [int(cp_idxs[i]) + 1 for i in range(n_stages - 1)]
+
+
+def _add_stage_boundaries(
+    fig: go.Figure,
+    metrics: dict[str, np.ndarray],
+    x_mode: str,
+    subplot_rows: list[tuple[str, int]] | None = None,
+) -> go.Figure:
+    """Add vertical lines and stage labels to *fig*.
+
+    x_mode: 'checkpoint' or 'iteration'.
+    subplot_rows: optional list of (x_mode, row_num) for multi-row figures.
+      When provided, adds boundaries to each row with its x_mode. row_num is 1-based.
+    """
+    rows_config: list[tuple[str, str, str]] = []
+    if subplot_rows:
+        for mode, r in subplot_rows:
+            xref = "x" if r == 1 else f"x{r}"
+            yref = "y domain" if r == 1 else f"y{r} domain"
+            rows_config.append((mode, xref, yref))
+    else:
+        rows_config.append((x_mode, "x", "paper"))
+
+    shapes = list(getattr(fig.layout, "shapes", None) or [])
+    annotations = list(getattr(fig.layout, "annotations", None) or [])
+
+    seen_modes: set[str] = set()
+    for row_mode, xref, yref in rows_config:
+        sb = _stage_boundaries_from_metrics(metrics, row_mode)
+        if sb is None:
+            continue
+        stage_names, boundary_xs, use_iters = sb
+        if not boundary_xs:
+            continue
+
+        for x in boundary_xs:
+            shapes.append(
+                dict(
+                    type="line",
+                    x0=x,
+                    x1=x,
+                    y0=0,
+                    y1=1,
+                    yref=yref,
+                    xref=xref,
+                    layer="above",
+                    line=dict(color="#000000", width=1.5, dash="dot"),
+                )
+            )
+
+        # Stage labels: add only once per x_mode to avoid duplicates
+        if row_mode in seen_modes:
+            continue
+        seen_modes.add(row_mode)
+        cp_idxs = metrics.get("stage_end_checkpoint_idxs")
+        iters = metrics.get("stage_end_iterations")
+        n = len(stage_names)
+        for i, name in enumerate(stage_names):
+            if use_iters and iters is not None:
+                start = 0 if i == 0 else float(iters[i - 1]) + 1
+                end = float(iters[i])
+            elif cp_idxs is not None:
+                start = 0 if i == 0 else int(cp_idxs[i - 1]) + 1
+                end = int(cp_idxs[i])
+            else:
+                continue
+            mid = (start + end) / 2
+            short = name.replace("stage", "").replace("_", " ").strip()
+            annotations.append(
+                dict(
+                    x=mid,
+                    y=1.02,
+                    xref=xref,
+                    yref="paper",
+                    text=short,
+                    showarrow=False,
+                    font=dict(size=10, color=C["muted"], family=FONT),
+                    xanchor="center",
+                )
+            )
+
+    fig.update_layout(shapes=shapes, annotations=annotations)
+    return fig
+
+
 # -- Training overview figures ------------------------------------------------
 
 
 def _build_loss(eid: str, mid: str, oids: list[str]) -> go.Figure:
     fig = go.Figure()
-    tvals: list[int] = []
-    ttxt: list[str] = []
+    first_m = next((_metrics(eid, mid, o) for o in oids if _metrics(eid, mid, o)), {})
+    tags = [str(t) for t in first_m.get("checkpoint_tags", [])]
+    cp_iters = first_m.get("checkpoint_iterations")
+    use_iter = cp_iters is not None and len(cp_iters) == len(tags)
 
     for oid in oids:
         m = _metrics(eid, mid, oid)
         if not m:
             continue
-        tags = [str(t) for t in m.get("checkpoint_tags", [])]
-        xs = list(range(len(tags)))
-        if not tvals:
-            tvals, ttxt = xs, tags
+        m_tags = [str(t) for t in m.get("checkpoint_tags", [])]
+        m_cp = m.get("checkpoint_iterations")
+        if m_cp is not None and len(m_cp) == len(m_tags):
+            m_xs = np.array(m_cp, dtype=float)
+        else:
+            m_xs = np.arange(len(m_tags))
 
         col = _opt_color(oid)
         lab = _opt_label(oid)
+        hover = [f"iter {int(x)} · {t}" for x, t in zip(m_xs, m_tags)]
         for key in sorted(m):
             if not key.startswith("loss_"):
                 continue
             lname = key[5:]
             fig.add_trace(
                 go.Scatter(
-                    x=xs,
+                    x=m_xs,
                     y=m[key],
                     mode="lines+markers",
                     name=f"{lab} · {lname}",
+                    text=hover,
+                    hoverinfo="text+y",
                     line=dict(
                         color=col,
                         width=2,
@@ -246,65 +483,80 @@ def _build_loss(eid: str, mid: str, oids: list[str]) -> go.Figure:
                     ),
                     marker=dict(size=4),
                     visible=True
-                    if lname in ("all_test", "all_train")
+                    if lname in ("all_train")
                     else "legendonly",
                 )
             )
 
     _style(fig, title=dict(text="Loss", font=dict(size=15)), height=380)
-    if tvals:
-        tv, tt = _thin_ticks(tvals, ttxt)
+    if tags:
+        ref_xs = np.array(cp_iters, dtype=float) if use_iter else np.arange(len(tags))
+        tick_labels = [str(int(x)) for x in ref_xs]
+        tv, tt = _thin_ticks(list(ref_xs), tick_labels)
         fig.update_xaxes(
-            tickvals=tv, ticktext=tt, tickangle=-40, title_text="Checkpoint"
+            tickvals=tv, ticktext=tt, tickangle=-40,
+            title_text="Iteration" if use_iter else "Checkpoint",
         )
     fig.update_yaxes(title_text="Loss")
+    _add_stage_boundaries(fig, first_m, "iteration" if use_iter else "checkpoint")
     _add_show_hide(fig)
     return fig
 
 
 def _build_acc(eid: str, mid: str, oids: list[str]) -> go.Figure:
     fig = go.Figure()
-    tvals: list[int] = []
-    ttxt: list[str] = []
+    first_m = next((_metrics(eid, mid, o) for o in oids if _metrics(eid, mid, o)), {})
+    tags = [str(t) for t in first_m.get("checkpoint_tags", [])]
+    cp_iters = first_m.get("checkpoint_iterations")
+    use_iter = cp_iters is not None and len(cp_iters) == len(tags)
 
     for oid in oids:
         m = _metrics(eid, mid, oid)
         if not m:
             continue
-        tags = [str(t) for t in m.get("checkpoint_tags", [])]
-        xs = list(range(len(tags)))
-        if not tvals:
-            tvals, ttxt = xs, tags
+        m_tags = [str(t) for t in m.get("checkpoint_tags", [])]
+        m_cp = m.get("checkpoint_iterations")
+        if m_cp is not None and len(m_cp) == len(m_tags):
+            m_xs = np.array(m_cp, dtype=float)
+        else:
+            m_xs = np.arange(len(m_tags))
 
         col = _opt_color(oid)
         lab = _opt_label(oid)
+        hover = [f"iter {int(x)} · {t}" for x, t in zip(m_xs, m_tags)]
         for key in sorted(m):
             if not key.startswith("acc_"):
                 continue
             aname = key[4:]
             fig.add_trace(
                 go.Scatter(
-                    x=xs,
+                    x=m_xs,
                     y=m[key],
                     mode="lines+markers",
                     name=f"{lab} · {aname}",
+                    text=hover,
+                    hoverinfo="text+y",
                     line=dict(
                         color=col,
                         width=2,
                         dash="solid" if "test" in aname else "dot",
                     ),
                     marker=dict(size=4),
-                    visible=True if aname == "all_test" else "legendonly",
+                    visible=True if aname in ("both_test", "all_test") else "legendonly",
                 )
             )
 
     _style(fig, title=dict(text="Accuracy", font=dict(size=15)), height=380)
-    if tvals:
-        tv, tt = _thin_ticks(tvals, ttxt)
+    if tags:
+        ref_xs = np.array(cp_iters, dtype=float) if use_iter else np.arange(len(tags))
+        tick_labels = [str(int(x)) for x in ref_xs]
+        tv, tt = _thin_ticks(list(ref_xs), tick_labels)
         fig.update_xaxes(
-            tickvals=tv, ticktext=tt, tickangle=-40, title_text="Checkpoint"
+            tickvals=tv, ticktext=tt, tickangle=-40,
+            title_text="Iteration" if use_iter else "Checkpoint",
         )
     fig.update_yaxes(title_text="Accuracy", range=[-0.02, 1.05])
+    _add_stage_boundaries(fig, first_m, "iteration" if use_iter else "checkpoint")
     _add_show_hide(fig)
     return fig
 
@@ -313,19 +565,13 @@ def _build_acc(eid: str, mid: str, oids: list[str]) -> go.Figure:
 
 
 def _parse_units(nts: dict[str, np.ndarray]) -> list[dict[str, Any]]:
-    if "unit_node_ids" not in nts or "units_meta" not in nts:
+    if "unit_node_ids" not in nts:
         return []
     out: list[dict[str, Any]] = []
-    for nid, meta in zip(nts["unit_node_ids"], nts["units_meta"]):
-        layer, idx, utype = str(meta).split("|")
-        out.append(
-            dict(
-                node_id=str(nid),
-                layer_name=layer,
-                unit_index=int(idx),
-                unit_type=utype,
-            )
-        )
+    for nid in nts["unit_node_ids"]:
+        parsed = parse_unit_node_id(str(nid))
+        if parsed is not None:
+            out.append(dict(parsed))
     return out
 
 
@@ -363,7 +609,10 @@ def _build_diagram(
             if key in act_nts:
                 arr = act_nts[key]
                 t = min(int(checkpoint_idx), len(arr) - 1)
-                act_vals[u["node_id"]] = float(arr[t])
+                val = arr[t]
+                act_vals[u["node_id"]] = float(
+                    np.mean(val) if isinstance(val, np.ndarray) else val
+                )
         if act_vals:
             nids = list(act_vals.keys())
             raw = np.array([act_vals[n] for n in nids])
@@ -371,7 +620,7 @@ def _build_diagram(
             v_min, v_max = log_raw.min(), log_raw.max()
             rng = max(float(v_max - v_min), 1e-8)
             for i, nid in enumerate(nids):
-                log_sizes[nid] = 4.0 + 4.0 * float(log_raw[i] - v_min) / rng
+                log_sizes[nid] = 4.0 + 6.0 * float(log_raw[i] - v_min) / rng
 
     # decorative input node
     fig.add_trace(
@@ -397,9 +646,18 @@ def _build_diagram(
         lu = layers[ln]
         n = len(lu)
         xs = [ci] * n
-        ys = [(i + 0.5) / max_n for i in range(n)]
+        # Vertically center each column: same inter-neuron spacing (1/max_n) as the
+        # widest layer, but offset so short layers (e.g. head) sit mid-chart—not stuck
+        # at the bottom.
+        ys = [0.5 + (2 * i + 1 - n) / (2 * max_n) for i in range(n)]
         cdata = [u["node_id"] for u in lu]
         is_conv = lu[0]["unit_type"] == "channel"
+        if is_conv:
+            node_color = C["accent"]
+        elif ln == "head":
+            node_color = C["green"]
+        else:
+            node_color = C["blue"]
         sizes = [log_sizes.get(u["node_id"], default_dot_sz) for u in lu]
         if act_vals:
             htxt = [
@@ -417,7 +675,7 @@ def _build_diagram(
                 mode="markers",
                 marker=dict(
                     size=sizes,
-                    color=C["accent"] if is_conv else C["blue"],
+                    color=node_color,
                     line=dict(width=0),
                 ),
                 customdata=cdata,
@@ -430,13 +688,18 @@ def _build_diagram(
             ln.replace("hidden.", "H")
             .replace("conv", "Conv")
             .replace("fc", "FC")
+            .replace("head", "Head")
         )
         fig.add_annotation(
             x=ci,
             y=-0.07,
             text=display,
             showarrow=False,
-            font=dict(size=10, color=C["muted"], family=FONT),
+            font=dict(
+                size=10,
+                color=C["green"] if ln == "head" else C["muted"],
+                family=FONT,
+            ),
         )
 
     # decorative output node
@@ -498,174 +761,408 @@ def _build_diagram(
 
 # -- Neuron detail ------------------------------------------------------------
 
-_SIG_TITLE = {
-    "sgd": "Gradient Signals",
-    "adam": "Adam Moments",
-    "adagrad": "Gradient Norm",
-}
+# Grad norm only (row 3)
+_GRAD_NORM_SIG = ("grad_norm", "Grad norm", C["red"])
 
-_SIG_MAP: dict[str, list[tuple[str, str, str]]] = {
-    "sgd": [
-        ("grad_norm", "Grad norm", C["red"]),
-        ("grad_cosine_sim", "Grad cos. sim.", C["purple"]),
-    ],
+# Cosine similarity row: grad_cosine_sim (all); for Adam also 1st moment cos sim (secondary y)
+_COSINE_SIM_SIGS: dict[str, list[tuple[str, str, str, bool]]] = {
+    "sgd": [("grad_cosine_sim", "Grad cos. sim.", C["purple"], False)],
     "adam": [
-        ("grad_norm", "Grad norm", C["red"]),
-        ("exp_avg_norm", "1st moment norm", C["purple"]),
-        ("exp_avg_sq_norm", "2nd moment norm", C["orange"]),
-        ("moment_cosine_sim", "Moment cos. sim.", C["green"]),
+        ("grad_cosine_sim", "Grad cos. sim.", C["purple"], False),
+        ("moment_cosine_sim", "1st moment cos. sim.", C["green"], True),  # secondary y
     ],
-    "adagrad": [
-        ("grad_norm", "Grad norm", C["red"]),
-    ],
+    "adagrad": [("grad_cosine_sim", "Grad cos. sim.", C["purple"], False)],
+    "pure_shampoo": [("grad_cosine_sim", "Grad cos. sim.", C["purple"], False)],
+    "grafted_shampoo": [("grad_cosine_sim", "Grad cos. sim.", C["purple"], False)],
 }
 
-# Adagrad gets a dedicated 4th row for the effective LR (very different scale)
-_ADAGRAD_LR_SIG = ("effective_lr_mean", "Effective LR", C["purple"])
+# Adam moments (exp_avg_norm, exp_avg_sq_norm) - only for Adam, two y axes
+_ADAM_MOMENTS_SIGS: list[tuple[str, str, str, bool]] = [
+    ("exp_avg_norm", "1st moment norm", C["blue"], False),
+    ("exp_avg_sq_norm", "2nd moment norm", C["orange"], True),  # secondary y
+]
+
+# Adagrad / grafted Shampoo: effective step scale (per-weight LR-style)
+_ADAGRAD_LR_SIG = ("effective_lr", "Effective LR", C["purple"])
+
+# Shampoo: global preconditioner inverse Frobenius norm (replicated per unit in logs)
+_H_INV_NORM_SIG = ("h_inv_norm", "Precond. inv. norm", "#0d9488")
 
 
 def _opt_type(oid: str) -> str:
+    if oid.startswith("pure_shampoo"):
+        return "pure_shampoo"
+    if oid.startswith("grafted_shampoo"):
+        return "grafted_shampoo"
     for t in ("sgd", "adam", "adagrad"):
         if oid.startswith(t):
             return t
     return "unknown"
 
 
-def _add_sig_trace(
-    fig: go.Figure,
+def _signal_at_checkpoints(
     sigs: dict[str, np.ndarray],
     sig_name: str,
     col_idx: int,
-    iters: np.ndarray,
-    label: str,
-    color: str,
-    row: int,
-) -> None:
+    cp_iters: np.ndarray,
+    unit_safe: str | None = None,
+) -> np.ndarray:
+    """Sample signal values at each checkpoint. Returns NaN where out of range.
+
+    For scalar signals: uses sigs[sig_name] 2D matrix (n_iters, n_units).
+    For array-valued per-unit signals: uses sigs[f"{sig_name}__{unit_safe}"]
+    (n_iters, n_vals) and computes mean over the value dimension for display.
+    """
+    if unit_safe is not None:
+        per_unit_key = f"{sig_name}__{unit_safe}"
+        if per_unit_key in sigs:
+            arr = sigs[per_unit_key]
+            if arr.ndim >= 2:
+                # Compute mean over value dimension for display
+                arr = np.mean(arr, axis=tuple(range(1, arr.ndim)))
+            n = len(arr)
+            vals = []
+            for it in cp_iters:
+                idx = int(it)
+                if 0 <= idx < n:
+                    vals.append(float(arr[idx]))
+                else:
+                    vals.append(np.nan)
+            return np.array(vals)
     if sig_name not in sigs:
-        return
+        return np.full(len(cp_iters), np.nan)
     arr = sigs[sig_name]
     if arr.ndim != 2 or col_idx >= arr.shape[1]:
-        return
-    y = arr[:, col_idx].astype(float)
-    x = iters
-    if len(y) > 2000:
-        step = max(1, len(y) // 2000)
-        y, x = y[::step], x[::step]
-    fig.add_trace(
-        go.Scatter(
-            x=x,
-            y=y,
-            mode="lines",
-            name=label,
-            line=dict(color=color, width=1.5),
-            opacity=0.85,
-        ),
-        row=row,
-        col=1,
-    )
+        return np.full(len(cp_iters), np.nan)
+    n = len(arr)
+    vals = []
+    for it in cp_iters:
+        idx = int(it)
+        if 0 <= idx < n:
+            vals.append(float(arr[idx, col_idx]))
+        else:
+            vals.append(np.nan)
+    return np.array(vals)
 
 
-def _build_detail(nid: str, eid: str, mid: str, oid: str) -> go.Figure:
+def _build_neuron_detail_figure(
+    nid: str, eid: str, mid: str, oid: str
+) -> go.Figure:
+    """Build one combined figure with shared x-axis: Activation, Weight, Grad norm,
+    Cosine similarity (dual y for Adam), Adam moments (Adam only),
+    Shampoo preconditioner norm (Shampoo only), Effective LR (Adagrad / grafted Shampoo).
+    """
     nts = _nts(eid, mid, oid)
     sigs = _sigs(eid, mid, oid)
+    metrics = _metrics(eid, mid, oid)
     otype = _opt_type(oid)
-    safe = nid.replace(":", "__")
 
     tags = [str(t) for t in nts.get("checkpoint_tags", [])]
-    cx = list(range(len(tags)))
+    cp_iters = metrics.get("checkpoint_iterations")
+    if cp_iters is None or len(cp_iters) != len(tags):
+        return _empty("Checkpoint iterations not available (re-run training)", 200)
+    x_iters = np.array(cp_iters, dtype=float)
 
-    has_sigs = bool(sigs) and "iteration" in sigs
-    adagrad_split = has_sigs and otype == "adagrad"
-    n_rows = 2
-    subtitles = ["Activation", "Weight Evolution"]
-    if has_sigs:
-        n_rows += 1
-        subtitles.append(_SIG_TITLE.get(otype, "Optimizer Signals"))
-    if adagrad_split:
-        n_rows += 1
-        subtitles.append("Effective Learning Rate")
+    has_sigs = bool(sigs) and "unit_node_ids" in sigs
+    uid_list = [str(n) for n in sigs.get("unit_node_ids", [])] if has_sigs else []
+    ci = uid_list.index(nid) if nid in uid_list else -1
+
+    # Row layout: 1=Activation, 2=Weight, 3=Grad norm, 4=Cosine sim (when has_sigs),
+    # 5=Adam moments (Adam only), then Shampoo precond. norm, then Effective LR
+    has_adam_moments = has_sigs and otype == "adam"
+    has_shampoo_h_inv = has_sigs and otype in ("pure_shampoo", "grafted_shampoo")
+    has_eff_lr = has_sigs and otype in ("adagrad", "grafted_shampoo")
+    has_grad_cos = has_sigs  # grad norm + cosine sim rows
+
+    n_rows = (
+        2
+        + (2 if has_grad_cos else 0)
+        + (1 if has_adam_moments else 0)
+        + (1 if has_shampoo_h_inv else 0)
+        + (1 if has_eff_lr else 0)
+    )
+    specs: list[list[dict]] = [[{}], [{}]]
+    if has_grad_cos:
+        specs.append([{}])
+        specs.append([{"secondary_y": True}] if otype == "adam" else [{}])
+    if has_adam_moments:
+        specs.append([{"secondary_y": True}])
+    if has_shampoo_h_inv:
+        specs.append([{}])
+    if has_eff_lr:
+        specs.append([{}])
+
+    subplot_titles = ["Activation", "Weight Evolution"]
+    if has_grad_cos:
+        subplot_titles.extend(["Grad norm", "Cosine similarity"])
+    if has_adam_moments:
+        subplot_titles.append("Adam moments")
+    if has_shampoo_h_inv:
+        subplot_titles.append("Precond. inv. norm")
+    if has_eff_lr:
+        subplot_titles.append("Effective LR")
 
     fig = make_subplots(
         rows=n_rows,
         cols=1,
-        subplot_titles=subtitles,
-        vertical_spacing=0.10,
+        shared_xaxes=True,
+        specs=specs,
+        vertical_spacing=0.06,
+        subplot_titles=subplot_titles,
     )
 
-    # row 1 - activation
-    ak = f"act__{safe}"
-    if ak in nts:
+    hover = [f"iter {int(x)} · {t}" for x, t in zip(x_iters, tags)]
+    tv, tt = _thin_ticks(list(x_iters), [str(int(x)) for x in x_iters])
+    row = 1
+
+    # Assign traces to per-subplot legends (legend for row 1, legend2 for row 2, etc.)
+    def _legend_for_row(r: int) -> str:
+        return "legend" if r == 1 else f"legend{r}"
+
+    # Row 1: Activation
+    safe = nid.replace(":", "__")
+    if f"act__{safe}" in nts:
+        act_arr = nts[f"act__{safe}"]
+        # Compute mean over sample/value dimensions for display
+        if act_arr.dtype == object:
+            act_1d = np.array([float(np.mean(act_arr[t])) for t in range(len(act_arr))])
+        elif act_arr.ndim > 1:
+            act_1d = np.mean(act_arr, axis=tuple(range(1, act_arr.ndim)))
+        else:
+            act_1d = act_arr
         fig.add_trace(
             go.Scatter(
-                x=cx,
-                y=nts[ak],
+                x=x_iters,
+                y=act_1d,
                 mode="lines+markers",
                 name="Activation",
+                legend=_legend_for_row(row),
+                text=hover,
+                hoverinfo="text+y",
                 line=dict(color=C["blue"], width=2),
                 marker=dict(size=5),
             ),
-            row=1,
+            row=row,
             col=1,
         )
+    row += 1
 
-    # row 2 - weight norm & cosine similarity
-    for key, label, color in [
-        (f"wnorm__{safe}", "Weight norm", C["accent"]),
-        (f"wcos__{safe}", "Weight cos. sim.", C["green"]),
-    ]:
-        if key in nts:
+    # Row 2: Weight
+    if f"wnorm__{safe}" in nts:
+        fig.add_trace(
+            go.Scatter(
+                x=x_iters,
+                y=nts[f"wnorm__{safe}"],
+                mode="lines+markers",
+                name="Weight norm",
+                legend=_legend_for_row(row),
+                text=hover,
+                hoverinfo="text+y",
+                line=dict(color=C["accent"], width=2),
+                marker=dict(size=5),
+            ),
+            row=row,
+            col=1,
+        )
+    row += 1
+
+    # Row 3: Grad norm (only when has_grad_cos)
+    if has_grad_cos:
+        if ci >= 0:
+            sname, slabel, scolor = _GRAD_NORM_SIG
+            y = _signal_at_checkpoints(sigs, sname, ci, x_iters)
+            if not np.all(np.isnan(y)):
+                fig.add_trace(
+                    go.Scatter(
+                        x=x_iters,
+                        y=y,
+                        mode="lines+markers",
+                        name=slabel,
+                        legend=_legend_for_row(row),
+                        text=hover,
+                        hoverinfo="text+y",
+                        line=dict(color=scolor, width=2),
+                        marker=dict(size=5),
+                    ),
+                    row=row,
+                    col=1,
+                )
+        row += 1
+
+    # Row 4: Cosine similarity (grad + 1st moment for Adam with secondary y)
+    if has_grad_cos:
+        if ci >= 0:
+            for sname, slabel, scolor, sec_y in _COSINE_SIM_SIGS.get(otype, []):
+                y = _signal_at_checkpoints(sigs, sname, ci, x_iters)
+                if not np.all(np.isnan(y)):
+                    fig.add_trace(
+                        go.Scatter(
+                            x=x_iters,
+                            y=y,
+                            mode="lines+markers",
+                            name=slabel,
+                            legend=_legend_for_row(row),
+                            text=hover,
+                            hoverinfo="text+y",
+                            line=dict(color=scolor, width=2),
+                            marker=dict(size=5),
+                        ),
+                        row=row,
+                        col=1,
+                        secondary_y=sec_y,
+                    )
+        row += 1
+
+    # Row 5: Adam moments (only when Adam) - two y axes
+    if has_adam_moments and ci >= 0:
+        for sname, slabel, scolor, sec_y in _ADAM_MOMENTS_SIGS:
+            y = _signal_at_checkpoints(sigs, sname, ci, x_iters)
+            if not np.all(np.isnan(y)):
+                fig.add_trace(
+                    go.Scatter(
+                        x=x_iters,
+                        y=y,
+                        mode="lines+markers",
+                        name=slabel,
+                        legend=_legend_for_row(row),
+                        text=hover,
+                        hoverinfo="text+y",
+                        line=dict(color=scolor, width=2),
+                        marker=dict(size=5),
+                    ),
+                    row=row,
+                    col=1,
+                    secondary_y=sec_y,
+                )
+        row += 1
+
+    # Preconditioner inverse norm (Pure / Grafted Shampoo)
+    if has_shampoo_h_inv and ci >= 0:
+        sname, slabel, scolor = _H_INV_NORM_SIG
+        y = _signal_at_checkpoints(sigs, sname, ci, x_iters)
+        if not np.all(np.isnan(y)):
             fig.add_trace(
                 go.Scatter(
-                    x=cx,
-                    y=nts[key],
+                    x=x_iters,
+                    y=y,
                     mode="lines+markers",
-                    name=label,
-                    line=dict(color=color, width=2),
+                    name=slabel,
+                    legend=_legend_for_row(row),
+                    text=hover,
+                    hoverinfo="text+y",
+                    line=dict(color=scolor, width=2),
                     marker=dict(size=5),
                 ),
-                row=2,
+                row=row,
+                col=1,
+            )
+        row += 1
+
+    # Effective LR (Adagrad or grafted Shampoo)
+    if has_eff_lr and ci >= 0:
+        sname, slabel, scolor = _ADAGRAD_LR_SIG
+        y = _signal_at_checkpoints(sigs, sname, ci, x_iters, unit_safe=safe)
+        # Backward compat: old data used effective_lr_mean as 2D matrix
+        if np.all(np.isnan(y)) and "effective_lr_mean" in sigs:
+            y = _signal_at_checkpoints(sigs, "effective_lr_mean", ci, x_iters)
+        if not np.all(np.isnan(y)):
+            fig.add_trace(
+                go.Scatter(
+                    x=x_iters,
+                    y=y,
+                    mode="lines+markers",
+                    name=slabel,
+                    legend=_legend_for_row(row),
+                    text=hover,
+                    hoverinfo="text+y",
+                    line=dict(color=scolor, width=2),
+                    marker=dict(size=5),
+                ),
+                row=row,
                 col=1,
             )
 
-    # row 3 - optimizer-specific per-iteration signals
-    if has_sigs:
-        iters = sigs["iteration"]
-        uid_list = [str(n) for n in sigs.get("unit_node_ids", [])]
-        if nid in uid_list:
-            ci = uid_list.index(nid)
-            for sname, slabel, scolor in _SIG_MAP.get(otype, []):
-                _add_sig_trace(fig, sigs, sname, ci, iters, slabel, scolor, 3)
-
-    # row 4 (adagrad only) - effective learning rate on its own scale
-    if adagrad_split:
-        iters = sigs["iteration"]
-        uid_list = [str(n) for n in sigs.get("unit_node_ids", [])]
-        if nid in uid_list:
-            ci = uid_list.index(nid)
-            sname, slabel, scolor = _ADAGRAD_LR_SIG
-            _add_sig_trace(fig, sigs, sname, ci, iters, slabel, scolor, 4)
-
-    for r in (1, 2):
-        fig.update_xaxes(tickvals=cx, ticktext=tags, tickangle=-40, row=r, col=1)
-    if has_sigs:
-        fig.update_xaxes(title_text="Iteration", row=3, col=1)
-    if adagrad_split:
-        fig.update_xaxes(title_text="Iteration", row=4, col=1)
-
-    _style(
-        fig,
-        height=240 * n_rows + 60,
-        title=dict(text=f"Unit: {nid}", font=dict(size=14)),
-        margin=dict(l=55, r=20, t=70, b=50),
-    )
-    fig.update_annotations(font=dict(color=C["muted"], family=FONT, size=12))
-    for r in range(1, n_rows + 1):
+    # Shared x-axis: tick labels on all subplots (fig.update_layout)
+    for i in range(1, n_rows + 1):
         fig.update_xaxes(
-            gridcolor=C["grid"], zerolinecolor=C["border"], row=r, col=1
+            tickvals=tv,
+            ticktext=tt,
+            tickangle=-40,
+            title_text="Iteration" if i == n_rows else "",
+            showticklabels=True,
+            row=i,
+            col=1,
         )
-        fig.update_yaxes(
-            gridcolor=C["grid"], zerolinecolor=C["border"], row=r, col=1
-        )
+
+    # Y-axis titles
+    fig.update_yaxes(title_text="Activation", row=1, col=1)
+    fig.update_yaxes(title_text="Value", row=2, col=1)
+    if has_grad_cos:
+        fig.update_yaxes(title_text="Norm", row=3, col=1)
+        fig.update_yaxes(title_text="Grad cos. sim.", row=4, col=1)
+        if otype == "adam":
+            fig.update_yaxes(title_text="1st moment cos. sim.", row=4, col=1, secondary_y=True)
+    adam_row = 3 + (2 if has_grad_cos else 0)
+    if has_adam_moments:
+        fig.update_yaxes(title_text="1st moment norm", row=adam_row, col=1)
+        fig.update_yaxes(title_text="2nd moment norm", row=adam_row, col=1, secondary_y=True)
+    if has_shampoo_h_inv:
+        h_inv_row = n_rows - (1 if has_eff_lr else 0)
+        fig.update_yaxes(title_text="Precond. inv. norm", row=h_inv_row, col=1)
+    if has_eff_lr:
+        fig.update_yaxes(title_text="Effective LR", row=n_rows, col=1)
+
+    height = 280 * n_rows
+    _style(fig, height=height)
+    _add_stage_boundaries(
+        fig,
+        metrics,
+        "iteration",
+        subplot_rows=[("iteration", r) for r in range(1, n_rows + 1)],
+    )
+
+    # Position one legend per subplot at the level of the relevant row.
+    # With secondary_y (e.g. Adam cosine row), yaxis4 and yaxis5 share a domain,
+    # so we map row index to unique subplot domains.
+    _legend_style: dict[str, Any] = dict(
+        bgcolor="rgba(0,0,0,0.3)",
+        bordercolor=C["border"],
+        borderwidth=1,
+        font=dict(size=10),
+        xanchor="right",
+        x=1.0,
+        xref="paper",
+        yref="paper",
+        visible=True,
+    )
+    seen_domains: list[tuple[float, float]] = []
+    for i in range(1, 20):
+        yax_key = "yaxis" if i == 1 else f"yaxis{i}"
+        try:
+            yax = getattr(fig.layout, yax_key, None)
+        except AttributeError:
+            break
+        if yax is None:
+            break
+        domain = getattr(yax, "domain", None)
+        if domain and len(domain) == 2:
+            dom_tup = (float(domain[0]), float(domain[1]))
+            if dom_tup not in seen_domains:
+                seen_domains.append(dom_tup)
+    legend_updates: dict[str, Any] = {}
+    for r in range(1, n_rows + 1):
+        leg_key = "legend" if r == 1 else f"legend{r}"
+        if r <= len(seen_domains):
+            y_center = (seen_domains[r - 1][0] + seen_domains[r - 1][1]) / 2
+            legend_updates[leg_key] = dict(
+                **_legend_style,
+                y=y_center,
+                yanchor="middle",
+            )
+    if legend_updates:
+        fig.update_layout(**legend_updates)
+
+    _make_dual_y_axes_symmetrical(fig)
     _add_show_hide(fig)
     return fig
 
@@ -696,11 +1193,7 @@ def _serve_layout() -> html.Div:
             html.Header(
                 className="app-header",
                 children=[
-                    html.H1("Network Analyzer"),
-                    html.P(
-                        "Neuron & synapse behavior explorer",
-                        className="subtitle",
-                    ),
+                    html.H1("Network Analyzer")
                 ],
             ),
             # -- top-level controls --
@@ -788,24 +1281,51 @@ def _serve_layout() -> html.Div:
                         className="slider-container",
                         children=[
                             html.Label(
-                                "Time (checkpoint)",
+                                "Training progress",
                                 className="slider-label",
                             ),
-                            dcc.Slider(
-                                id="slider-checkpoint",
-                                min=0,
-                                max=0,
-                                step=1,
-                                value=0,
-                                marks={},
-                                disabled=True,
-                                updatemode="drag",
-                                tooltip={
-                                    "placement": "bottom",
-                                    "always_visible": False,
-                                },
+                            html.Div(
+                                className="slider-with-play",
+                                children=[
+                                    html.Button(
+                                        "▶ Play",
+                                        id="btn-slider-autoplay",
+                                        className="slider-play-btn",
+                                        type="button",
+                                        disabled=True,
+                                        title="Animate checkpoints (5s per full sweep, loops until paused)",
+                                        n_clicks=0,
+                                    ),
+                                    html.Div(
+                                        className="slider-track-wrap",
+                                        children=[
+                                            dcc.Slider(
+                                                id="slider-checkpoint",
+                                                min=0,
+                                                max=0,
+                                                step=1,
+                                                value=0,
+                                                marks={},
+                                                disabled=True,
+                                                updatemode="drag",
+                                                tooltip={
+                                                    "placement": "bottom",
+                                                    "always_visible": False,
+                                                },
+                                            ),
+                                        ],
+                                    ),
+                                ],
                             ),
                         ],
+                    ),
+                    dcc.Store(id="store-slider-autoplay", data=False),
+                    dcc.Interval(
+                        id="interval-slider-autoplay",
+                        interval=5000,
+                        n_intervals=0,
+                        disabled=True,
+                        max_intervals=-1,
                     ),
                     html.Div(
                         className="neuron-detail",
@@ -816,8 +1336,9 @@ def _serve_layout() -> html.Div:
                                 className="hint-text",
                             ),
                             dcc.Graph(
-                                id="graph-neuron",
+                                id="graph-neuron-detail",
                                 figure=_empty("", 100),
+                                className="neuron-graph",
                             ),
                         ],
                     ),
@@ -825,6 +1346,9 @@ def _serve_layout() -> html.Div:
             ),
             # client-side store for the last-clicked node id
             dcc.Store(id="store-node"),
+            # list of checkpoint iteration numbers (int) for the current optimizer,
+            # or null when falling back to checkpoint-index mode
+            dcc.Store(id="store-cp-iters", data=None),
         ],
     )
 
@@ -888,6 +1412,7 @@ def _cb_training(eid: str | None, mid: str | None):
     Output("slider-checkpoint", "marks"),
     Output("slider-checkpoint", "value"),
     Output("slider-checkpoint", "disabled"),
+    Output("store-cp-iters", "data"),
     Input("dd-experiment", "value"),
     Input("dd-model", "value"),
     Input("dd-optimizer", "value"),
@@ -896,25 +1421,198 @@ def _cb_slider(
     eid: str | None, mid: str | None, oid: str | None
 ):
     if not eid or not mid or not oid:
-        return 0, {}, 0, True
+        return 0, {}, 0, True, None
     nts = _nts(eid, mid, oid)
+    metrics = _metrics(eid, mid, oid)
     tags = [str(t) for t in nts.get("checkpoint_tags", [])]
     n = len(tags)
     if n == 0:
-        return 0, {}, 0, True
+        return 0, {}, 0, True, None
+
+    cp_iters_raw = metrics.get("checkpoint_iterations")
+    use_iter = cp_iters_raw is not None and len(cp_iters_raw) == n
+
+    # Choose which checkpoint indices get a visible label (uniformly sampled).
     MAX_MARKS = 12
     if n <= MAX_MARKS:
-        idxs = list(range(n))
+        labeled_idxs = list(range(n))
     else:
         step = max(1, n // MAX_MARKS)
-        idxs = list(range(0, n, step))
-        if idxs[-1] != n - 1:
-            idxs.append(n - 1)
-    marks = {
-        i: {"label": tags[i], "style": {"fontSize": "10px", "color": C["muted"]}}
-        for i in idxs
-    }
-    return n - 1, marks, n - 1, False
+        labeled_idxs = list(range(0, n, step))
+        if labeled_idxs[-1] != n - 1:
+            labeled_idxs.append(n - 1)
+
+    stage_tick = "\u275A"
+    stage_style = {"fontSize": "14px", "color": C["accent"], "fontWeight": "700"}
+    label_style = {"fontSize": "10px", "color": C["muted"]}
+
+    if use_iter and cp_iters_raw is not None:
+        # Slider value space = actual iteration numbers so the tooltip is meaningful.
+        # step=1 lets users drag freely; _cb_diagram snaps to the nearest checkpoint.
+        cp_list: list[int] = [int(x) for x in cp_iters_raw]
+        slider_max = cp_list[-1]
+        slider_val = cp_list[-1]
+
+        # Marks keyed by iteration value (not checkpoint index).
+        marks: dict[int, Any] = {}
+        for idx in labeled_idxs:
+            marks[cp_list[idx]] = {
+                "label": str(cp_list[idx]),
+                "style": label_style,
+            }
+
+        # Stage-switch ticks: decorate the mark at the matching iteration.
+        for sw in _stage_switch_checkpoint_indices(metrics):
+            if sw < 0 or sw >= n:
+                continue
+            iter_val = cp_list[sw]
+            existing = marks.get(iter_val)
+            if existing and isinstance(existing, dict):
+                lab = existing.get("label", "")
+                st = dict(existing.get("style") or {})
+            else:
+                lab = ""
+                st = {}
+            label_text = f"{stage_tick} {lab}" if lab else stage_tick
+            marks[iter_val] = {"label": label_text, "style": {**st, **stage_style}}
+
+        return slider_max, marks, slider_val, False, cp_list
+
+    else:
+        # Fallback: slider value = checkpoint index (0..n-1).
+        marks_idx: dict[int, Any] = {
+            i: {"label": tags[i], "style": label_style}
+            for i in labeled_idxs
+        }
+        for sw in _stage_switch_checkpoint_indices(metrics):
+            if sw < 0 or sw >= n:
+                continue
+            if sw in marks_idx:
+                m = marks_idx[sw]
+                lab = m.get("label", "") if isinstance(m, dict) else str(m)
+                st = dict(m.get("style") or {}) if isinstance(m, dict) else {}
+                label_text = f"{stage_tick} {lab}" if lab else stage_tick
+                marks_idx[sw] = {"label": label_text, "style": {**st, **stage_style}}
+            else:
+                marks_idx[sw] = {"label": stage_tick, "style": stage_style}
+        return n - 1, marks_idx, n - 1, False, None
+
+
+def _autoplay_step_ms(n_checkpoints: int) -> int:
+    """Milliseconds between checkpoint steps so a full sweep takes ~5s."""
+    if n_checkpoints <= 1:
+        return 5000
+    return max(1, int(round(5000.0 / (n_checkpoints - 1))))
+
+
+@app.callback(
+    Output("btn-slider-autoplay", "disabled"),
+    Input("slider-checkpoint", "max"),
+)
+def _cb_autoplay_btn_disabled(smax: int):
+    return smax <= 0
+
+
+@app.callback(
+    Output("store-slider-autoplay", "data"),
+    Output("interval-slider-autoplay", "disabled"),
+    Output("interval-slider-autoplay", "interval"),
+    Output("btn-slider-autoplay", "children"),
+    Output("slider-checkpoint", "value", allow_duplicate=True),
+    Input("btn-slider-autoplay", "n_clicks"),
+    Input("dd-experiment", "value"),
+    Input("dd-model", "value"),
+    Input("dd-optimizer", "value"),
+    Input("slider-checkpoint", "max"),
+    State("store-slider-autoplay", "data"),
+    State("store-cp-iters", "data"),
+    prevent_initial_call=True,
+)
+def _cb_autoplay_control(
+    n_clicks: int | None,
+    eid: str | None,
+    mid: str | None,
+    oid: str | None,
+    smax: int,
+    playing: bool,
+    cp_list: list[int] | None,
+):
+    trig_comp = (
+        callback_context.triggered[0]["prop_id"].rsplit(".", 1)[0]
+        if callback_context.triggered
+        else None
+    )
+
+    n_cp = len(cp_list) if cp_list else (smax + 1)
+    step_ms = _autoplay_step_ms(n_cp)
+
+    if trig_comp == "btn-slider-autoplay":
+        if smax <= 0:
+            return False, True, step_ms, "▶ Play", no_update
+        nxt = not playing
+        if nxt:
+            return True, False, step_ms, "⏸ Pause", no_update
+        return False, True, step_ms, "▶ Play", no_update
+
+    # Experiment / model / optimizer / max changed: stop autoplay and sync timing
+    return False, True, step_ms, "▶ Play", no_update
+
+
+@app.callback(
+    Output("slider-checkpoint", "value", allow_duplicate=True),
+    Input("interval-slider-autoplay", "n_intervals"),
+    State("store-slider-autoplay", "data"),
+    State("slider-checkpoint", "max"),
+    State("slider-checkpoint", "value"),
+    State("store-cp-iters", "data"),
+    prevent_initial_call=True,
+)
+def _cb_autoplay_tick(
+    _n: int,
+    playing: bool,
+    smax: int,
+    val: int | None,
+    cp_list: list[int] | None,
+):
+    if not playing or smax <= 0 or val is None:
+        return no_update
+    if cp_list:
+        v = int(val)
+        # Find current position in cp_list and advance to the next checkpoint.
+        try:
+            idx = cp_list.index(v)
+        except ValueError:
+            dists = [abs(x - v) for x in cp_list]
+            idx = dists.index(min(dists))
+        next_idx = (idx + 1) % len(cp_list)
+        return cp_list[next_idx]
+    # Fallback: checkpoint-index mode — advance by 1.
+    v = int(val)
+    return v + 1 if v < smax else 0
+
+
+def _slider_val_to_cp_idx(
+    slider_val: int | None,
+    cp_iters: np.ndarray | None,
+    n: int,
+) -> int | None:
+    """Convert a slider value to a checkpoint array index.
+
+    When cp_iters is available the slider value is an iteration number; we
+    find the checkpoint whose iteration is closest (exact match preferred).
+    Otherwise the slider value is already the checkpoint index.
+    """
+    if slider_val is None:
+        return None
+    if cp_iters is None or len(cp_iters) != n:
+        return int(slider_val)
+    v = int(slider_val)
+    cp_list = [int(x) for x in cp_iters]
+    try:
+        return cp_list.index(v)
+    except ValueError:
+        dists = [abs(x - v) for x in cp_list]
+        return dists.index(min(dists))
 
 
 @app.callback(
@@ -928,7 +1626,7 @@ def _cb_diagram(
     eid: str | None,
     mid: str | None,
     oid: str | None,
-    checkpoint_idx: int | None,
+    slider_val: int | None,
 ):
     if eid is None or mid is None:
         return _empty("Select an experiment & model to view architecture", 200)
@@ -939,6 +1637,14 @@ def _cb_diagram(
     ref_oid = oid if oid else oids_avail[0]
     nts = _nts(eid, mid, ref_oid)
     units = _parse_units(nts)
+
+    checkpoint_idx: int | None = None
+    if slider_val is not None:
+        n = len(nts.get("checkpoint_tags", []))
+        m = _metrics(eid, mid, ref_oid)
+        cp_iters = m.get("checkpoint_iterations") if m else None
+        checkpoint_idx = _slider_val_to_cp_idx(slider_val, cp_iters, n)
+
     return _build_diagram(
         units,
         mid,
@@ -966,7 +1672,7 @@ def _cb_click(click_data: dict | None):
 
 
 @app.callback(
-    Output("graph-neuron", "figure"),
+    Output("graph-neuron-detail", "figure"),
     Output("hint-text", "children"),
     Input("store-node", "data"),
     Input("dd-optimizer", "value"),
@@ -980,20 +1686,19 @@ def _cb_neuron(
     mid: str | None,
 ):
     hint_default = "Click a node in the diagram above to inspect it."
+    empty = _empty("", 100)
     if nid is None or eid is None or mid is None:
-        return _empty("Click a node to see details", 100), hint_default
+        return empty, hint_default
     if oid is None:
-        return (
-            _empty("Select an optimizer first to inspect nodes", 100),
-            "⚠ Select an optimizer above first, then click a node.",
-        )
+        return empty, "⚠ Select an optimizer above first, then click a node."
 
     nts = _nts(eid, mid, oid)
     safe = nid.replace(":", "__")
     if f"act__{safe}" not in nts:
-        return _empty("Select a node from the diagram", 100), hint_default
+        return empty, hint_default
 
-    return _build_detail(nid, eid, mid, oid), f"Selected: {nid}"
+    fig = _build_neuron_detail_figure(nid, eid, mid, oid)
+    return fig, f"Selected: {nid}"
 
 
 # -- Entry point --------------------------------------------------------------

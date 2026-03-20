@@ -20,6 +20,10 @@ Multiple optimizers/models/experiments (CSV lists)::
 
     uv run run-simulation --experiment Exp1,Exp2 --model M1,M2 --optimizer adam,adagrad
 
+Use ``all`` as a model or optimizer token (JSON or CLI) to include every name in the
+corresponding registry (sorted). You can combine with explicit names, e.g. ``adam,all``,
+to union shorthands with all registered extractors.
+
 Add ``--force`` to overwrite existing results. Use ``--parallel K`` to run K simulations
 in parallel.
 """
@@ -46,6 +50,7 @@ if str(_PROJECT_ROOT) not in sys.path:
 from compute_results.config_guard import (
     ConfigConflictError,
     build_training_config,
+    expand_registry_selection,
     guard_optimizer_config,
     guard_training_config,
     load_existing_optimizer_ids,
@@ -54,6 +59,7 @@ from compute_results.config_guard import (
     save_metadata,
     save_optimizer_config,
 )
+from compute_results.defaults import OPTIMIZER_LR_KEY, SHAMPOO_PRECONDITIONER_EPSILON_KEY
 from compute_results.training_loop import train_with_config
 from experiments import get_experiment, list_experiments
 from models import apply_xavier_init, get_model, list_models
@@ -65,8 +71,9 @@ OPTIMIZER_SHORTHAND: dict[str, tuple[str, dict]] = {
     "sgd": ("SGDExtractor", {}),
     "adam": ("AdamExtractor", {}),
     "adagrad": ("AdaGradExtractor", {}),
+    "pure_shampoo": ("PureShampooExtractor", {}),
+    "graft_shampoo": ("GraftedShampooExtractor", {}),
 }
-
 
 def _parse_csv(value: str | list) -> list[str]:
     """Split a comma-separated string or list into non-empty parts."""
@@ -77,13 +84,21 @@ def _parse_csv(value: str | list) -> list[str]:
     return [str(value).strip()]
 
 
-def _resolve_optimizer(name: str, base_lr: float) -> tuple[str, dict]:
-    """Map short names like 'adam' to (ExtractorClass, kwargs)."""
+def _resolve_optimizer(name: str, base_lr: float, **kwargs) -> tuple[str, dict]:
+    """Resolve shorthand / class name to (registry class name, ``get_extractor`` kwargs).
+
+    *base_lr* always becomes ``OPTIMIZER_LR_KEY`` (overrides the same key in
+    ``**kwargs`` if present). Remaining ``**kwargs`` are forwarded
+    """
     name = name.strip()
     if name in OPTIMIZER_SHORTHAND:
         cls_name, extra = OPTIMIZER_SHORTHAND[name]
-        return cls_name, {**extra, "lr": base_lr}
-    return name, {"lr": base_lr}
+        out = {**extra, **kwargs}
+    else:
+        cls_name = name
+        out = dict(kwargs)
+    out[OPTIMIZER_LR_KEY] = base_lr
+    return cls_name, out
 
 
 def _validate_names(
@@ -119,16 +134,15 @@ class _Task:
     model_class: str
     model_kwargs: dict
     optimizer_name: str
+    optimizer_class: str
+    optimizer_kwargs: dict
     config: dict
     seed: int
     results_dir: Path
 
     @property
     def optimizer_dir(self) -> Path:
-        ext_cls, ext_kwargs = _resolve_optimizer(
-            self.optimizer_name, self.config["base_lr"]
-        )
-        extractor = get_extractor(ext_cls, **ext_kwargs)
+        extractor = get_extractor(self.optimizer_class, **self.optimizer_kwargs)
         return self.results_dir / "optimizers" / extractor.optimizer_id()
 
 
@@ -154,8 +168,7 @@ def _run_single_task(
     t = task
     experiment = get_experiment(t.experiment_class, **t.experiment_kwargs)
     model = get_model(t.model_class, **t.model_kwargs)
-    ext_cls, ext_kwargs = _resolve_optimizer(t.optimizer_name, t.config["base_lr"])
-    extractor = get_extractor(ext_cls, **ext_kwargs)
+    extractor = get_extractor(t.optimizer_class, **t.optimizer_kwargs)
 
     _torch.manual_seed(t.seed)
     apply_xavier_init(model)
@@ -203,20 +216,43 @@ def _parse_args() -> argparse.Namespace:
     )
     p.add_argument(
         "--model",
-        help="Model class name(s), comma-separated (e.g. DNN5Hidden64,CNN3ConvK5Out64ThenFC64).",
+        help=(
+            "Model class name(s), comma-separated. "
+            "Use 'all' to include every registered model (optionally mix with names)."
+        ),
     )
     p.add_argument(
         "--optimizer",
-        help="Optimizer shorthand(s) or extractor class name(s), comma-separated (e.g. adam,adagrad).",
+        help=(
+            "Optimizer shorthand(s) or extractor class name(s), comma-separated. "
+            "Use 'all' to include every registered extractor (optionally mix with names)."
+        ),
     )
     p.add_argument("--digitA", type=int, default=1)
     p.add_argument("--digitB", type=int, default=2)
+    p.add_argument(
+        "--base-ratio",
+        type=float,
+        default=0.25,
+        help="Pretrain base subset ratio (0-1). Used by Pretrain25ThenDigitAThenDigitB_25_75.",
+    )
     p.add_argument("--stage-epochs", type=int, default=3)
     p.add_argument("--base-lr", type=float, default=1e-3)
     p.add_argument("--batch-size", type=int, default=1)
     p.add_argument("--seed", type=int, default=3003)
     p.add_argument("--activation", default="relu")
     p.add_argument("--checkpoint-cadence", default="every_epoch")
+    p.add_argument(
+        "--shampoo-preconditioner-epsilon",
+        type=float,
+        default=None,
+        metavar="EPS",
+        help=(
+            "DistributedShampoo preconditioner epsilon (inverse-root damping); "
+            "see shampoo_preconditioner_epsilon in JSON config. "
+            "Overrides the JSON value when both are set."
+        ),
+    )
     p.add_argument(
         "--force",
         action="store_true",
@@ -266,7 +302,11 @@ def main() -> int:
             )
             sys.exit(1)
         experiment_classes = _parse_csv(args.experiment)
-        experiment_kwargs = {"digitA": args.digitA, "digitB": args.digitB}
+        experiment_kwargs = {
+            "digitA": args.digitA,
+            "digitB": args.digitB,
+            "base_ratio": args.base_ratio,
+        }
         model_classes = _parse_csv(args.model)
         model_kwargs = {"activation": args.activation}
         optimizer_names = _parse_csv(args.optimizer)
@@ -278,6 +318,27 @@ def main() -> int:
         checkpoint_cadence = args.checkpoint_cadence
         force = args.force
         parallel = args.parallel
+        raw = {}  # no JSON; CLI-only path
+
+    opt_extra_kwargs: dict = {}
+    eps_from_json = raw.get(SHAMPOO_PRECONDITIONER_EPSILON_KEY)
+    if eps_from_json is not None:
+        opt_extra_kwargs[SHAMPOO_PRECONDITIONER_EPSILON_KEY] = float(eps_from_json)
+    if args.shampoo_preconditioner_epsilon is not None:
+        opt_extra_kwargs[SHAMPOO_PRECONDITIONER_EPSILON_KEY] = float(
+            args.shampoo_preconditioner_epsilon
+        )
+
+    try:
+        model_classes = expand_registry_selection(
+            model_classes, available=list_models()
+        )
+        optimizer_names = expand_registry_selection(
+            optimizer_names, available=list_extractors()
+        )
+    except ValueError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        sys.exit(1)
 
     _validate_names(experiment_classes, model_classes, optimizer_names)
 
@@ -308,6 +369,9 @@ def main() -> int:
             checkpoint_cadence=checkpoint_cadence,
         )
 
+        opt_class, opt_kwargs = _resolve_optimizer(
+            opt_name, base_lr, **opt_extra_kwargs
+        )
         all_tasks.append(
             _Task(
                 experiment_class=exp_cls,
@@ -315,6 +379,8 @@ def main() -> int:
                 model_class=mod_cls,
                 model_kwargs=mod_kw,
                 optimizer_name=opt_name,
+                optimizer_class=opt_class,
+                optimizer_kwargs=opt_kwargs,
                 config=config,
                 seed=seed,
                 results_dir=results_dir,
@@ -330,10 +396,9 @@ def main() -> int:
             if force:
                 to_run.append(task)
             else:
-                ext_cls, ext_kwargs = _resolve_optimizer(
-                    task.optimizer_name, task.config["base_lr"]
+                extractor = get_extractor(
+                    task.optimizer_class, **task.optimizer_kwargs
                 )
-                extractor = get_extractor(ext_cls, **ext_kwargs)
                 skipped.append(
                     (
                         task.results_dir.parent.name,  # experiment_id
@@ -375,10 +440,7 @@ def main() -> int:
 
     # Per-task: optimizer guard and save
     for task in to_run:
-        ext_cls, ext_kwargs = _resolve_optimizer(
-            task.optimizer_name, task.config["base_lr"]
-        )
-        extractor = get_extractor(ext_cls, **ext_kwargs)
+        extractor = get_extractor(task.optimizer_class, **task.optimizer_kwargs)
         try:
             guard_optimizer_config(
                 task.optimizer_dir,
@@ -394,10 +456,7 @@ def main() -> int:
     exp_model_optimizers: dict[tuple[str, str, Path], set[str]] = {}
     for task in to_run:
         key = (task.experiment_class, task.model_class, task.results_dir)
-        ext_cls, ext_kwargs = _resolve_optimizer(
-            task.optimizer_name, task.config["base_lr"]
-        )
-        extractor = get_extractor(ext_cls, **ext_kwargs)
+        extractor = get_extractor(task.optimizer_class, **task.optimizer_kwargs)
         exp_model_optimizers.setdefault(key, set()).add(extractor.optimizer_id())
     for (exp_cls, mod_cls, results_dir), opt_ids in exp_model_optimizers.items():
         existing = load_existing_optimizer_ids(results_dir)

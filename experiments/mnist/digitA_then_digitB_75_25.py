@@ -29,11 +29,11 @@ class DigitAThenDigitB_75_25(MNISTWrapper):
         test_by_digit = digit_indices(self._test_ds, self.digits)
 
         all_train = train_by_digit[self.digitA] + train_by_digit[self.digitB]
-        all_test = test_by_digit[self.digitA] + test_by_digit[self.digitB]
+        both_test = test_by_digit[self.digitA] + test_by_digit[self.digitB]
 
         eval_loaders = {
             "all_train": make_loader(self._train_ds, all_train, batch_size=256, shuffle=False),
-            "all_test": make_loader(self._test_ds, all_test, batch_size=256, shuffle=False),
+            "both_test": make_loader(self._test_ds, both_test, batch_size=256, shuffle=False),
             f"digitA_{self.digitA}_test": make_loader(
                 self._test_ds, test_by_digit[self.digitA], batch_size=256, shuffle=False,
             ),
@@ -51,6 +51,6 @@ class DigitAThenDigitB_75_25(MNISTWrapper):
             name=f"stageB_digit{self.digitB}",
             train_loader=make_loader(self._train_ds, train_by_digit[self.digitB], batch_size),
             eval_loaders=eval_loaders,
-            is_turning_point=True,
+            is_stage_switch=True,
         )
         return [stage_a, stage_b]

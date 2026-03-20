@@ -4,9 +4,11 @@ from typing import Any
 import torch.nn as nn
 
 from models.base import AnalyzableModel, get_activation, register_model
+from models.unit_node_id import format_unit_node_id
 
 HIDDEN_SIZE = 64
 N_HIDDEN = 5
+FLATTEN_IMAGE_SIZE = 28 * 28
 
 @register_model
 class DNN5Hidden64(AnalyzableModel):
@@ -18,7 +20,7 @@ class DNN5Hidden64(AnalyzableModel):
         self._num_classes = num_classes
 
         layers: list[nn.Module] = []
-        in_features = 784
+        in_features = FLATTEN_IMAGE_SIZE
         for i in range(N_HIDDEN):
             layers.append(nn.Linear(in_features, HIDDEN_SIZE))
             layers.append(get_activation(activation))
@@ -49,11 +51,20 @@ class DNN5Hidden64(AnalyzableModel):
             layer_name = f"hidden.{layer_idx * 2}"
             for neuron_idx in range(HIDDEN_SIZE):
                 units.append({
-                    "node_id": f"dnn:{layer_name}:neuron_{neuron_idx}",
+                    "node_id": format_unit_node_id(
+                        "dnn", layer_name, "neuron", neuron_idx
+                    ),
                     "layer_name": layer_name,
                     "unit_index": neuron_idx,
                     "unit_type": "neuron",
                 })
+        for k in range(self._num_classes):
+            units.append({
+                "node_id": format_unit_node_id("dnn", "head", "neuron", k),
+                "layer_name": "head",
+                "unit_index": k,
+                "unit_type": "neuron",
+            })
         return units
 
     def hookable_layers(self) -> dict[str, nn.Module]:
@@ -61,4 +72,5 @@ class DNN5Hidden64(AnalyzableModel):
         for layer_idx in range(N_HIDDEN):
             name = f"hidden.{layer_idx * 2}"
             layers[name] = self.hidden[layer_idx * 2]
+        layers["head"] = self.head
         return layers

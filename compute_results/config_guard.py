@@ -35,6 +35,34 @@ def parse_checkpoint_cadence(cadence: str) -> tuple[str, int | None]:
 
 FRAMEWORK_VERSION = "0.1.0"
 
+# In JSON / CLI lists (e.g. ``model_class``, ``optimizer``), this token expands to
+# every name in the corresponding registry
+ALL_AVAILABLE_SELECTION = "all"
+
+
+def expand_registry_selection(
+    names: list[str],
+    *,
+    available: list[str],
+    selection: str = ALL_AVAILABLE_SELECTION,
+) -> list[str]:
+    """Simply expand the "all" option to the full available set.
+    """
+    if not names:
+        raise ValueError("expand_registry_selection: names must be non-empty")
+    selection_l = selection.lower()
+    has_sentinel = any(n.strip().lower() == selection_l for n in names)
+    if not has_sentinel:
+        return names
+    explicit = [
+        n.strip()
+        for n in names
+        if n.strip() and n.strip().lower() != selection_l
+    ]
+    avail_set = set(available)
+    merged = set(explicit) | avail_set
+    return sorted(merged)
+
 # Fields that define the training config (optimizer-independent).
 # If any of these differ between the incoming config and what is already on
 # disk, the run is rejected unless --force is used.
@@ -49,7 +77,7 @@ TRAINING_CONFIG_KEYS = [
     "seed",
     "activation",
     "checkpoint_cadence",
-    "disable_cp_turning_point",
+    "disable_cp_stage_switch",
 ]
 
 
@@ -72,7 +100,7 @@ def build_training_config(
     seed: int = 3003,
     activation: str = "relu",
     checkpoint_cadence: str = "every_epoch",
-    disable_cp_turning_point: bool = False,
+    disable_cp_stage_switch: bool = False,
 ) -> dict[str, Any]:
     parse_checkpoint_cadence(checkpoint_cadence)
     config: dict[str, Any] = {
@@ -86,7 +114,7 @@ def build_training_config(
         "seed": seed,
         "activation": activation,
         "checkpoint_cadence": checkpoint_cadence,
-        "disable_cp_turning_point": disable_cp_turning_point,
+        "disable_cp_stage_switch": disable_cp_stage_switch,
         "framework_version": FRAMEWORK_VERSION,
     }
     config["training_config_fingerprint"] = compute_fingerprint(config)
