@@ -8,6 +8,19 @@ import re
 from pathlib import Path
 from typing import Any
 
+# Keys omitted from the training fingerprint and from training-config equality checks.
+# ``framework_version`` is ignored if present in an old config.json on disk.
+FINGERPRINT_EXCLUDE_KEYS = frozenset(
+    {
+        "internal_keep_tensors",
+        "device",
+        "save_model_cp",
+        "force",
+        "training_config_fingerprint",
+        "framework_version",
+    }
+)
+
 
 def parse_checkpoint_cadence(cadence: str) -> tuple[str, int | None]:
     """Parse checkpoint_cadence into a (mode, interval) pair.
@@ -33,7 +46,6 @@ def parse_checkpoint_cadence(cadence: str) -> tuple[str, int | None]:
         "Use 'every_epoch' or 'K its' / 'K iterations' (e.g. '100 its')."
     )
 
-FRAMEWORK_VERSION = "0.1.0"
 
 # In JSON / CLI lists (e.g. ``model_class``, ``optimizer``), this token expands to
 # every name in the corresponding registry
@@ -63,29 +75,45 @@ def expand_registry_selection(
     merged = set(explicit) | avail_set
     return sorted(merged)
 
-# Fields that define the training config (optimizer-independent).
-# If any of these differ between the incoming config and what is already on
-# disk, the run is rejected unless --force is used.
-TRAINING_CONFIG_KEYS = [
-    "experiment_class",
-    "experiment_config",
-    "model_class",
-    "model_config",
-    "stage_epochs",
-    "base_lr",
-    "batch_size",
-    "seed",
-    "activation",
-    "checkpoint_cadence",
-    "disable_cp_stage_switch",
-]
+
+def fingerprint_payload(config: dict[str, Any]) -> dict[str, Any]:
+    """Training-relevant subset of *config* used for hashing and equality checks."""
+    return {k: v for k, v in config.items() if k not in FINGERPRINT_EXCLUDE_KEYS}
 
 
 def compute_fingerprint(config: dict[str, Any]) -> str:
-    """Deterministic hash of the training-relevant config subset."""
-    subset = {k: config[k] for k in TRAINING_CONFIG_KEYS if k in config}
-    canonical = json.dumps(subset, sort_keys=True, default=str)
-    return hashlib.sha256(canonical.encode()).hexdigest()[:16]
+    """Full SHA-256 hex digest of the fingerprint payload (deterministic)."""
+    payload = fingerprint_payload(config)
+    canonical = json.dumps(payload, sort_keys=True, default=str)
+    return hashlib.sha256(canonical.encode()).hexdigest()
+
+
+def result_id_for_config(
+    config: dict[str, Any],
+    *,
+    experiment_dir: Path,
+    model_id: str,
+) -> str:
+    """Directory name under *experiment_dir* for this training config (first 6 hex of digest).
+
+    If ``experiment_dir / <id> / model_id`` already exists with a different training
+    payload, tries ``<prefix>_2``, ``<prefix>_3``, ...
+    """
+    prefix = compute_fingerprint(config)[:6]
+    for i in range(1, 10_000):
+        rid = prefix if i == 1 else f"{prefix}_{i}"
+        results_dir = experiment_dir / rid / model_id
+        config_path = results_dir / "config.json"
+        if not config_path.exists():
+            return rid
+        stored = dict(json.loads(config_path.read_text()))
+        stored.setdefault("save_model_cp", False)
+        if fingerprint_payload(config) == fingerprint_payload(stored):
+            return rid
+    raise ConfigConflictError(
+        f"Could not allocate a result_id under {experiment_dir} for model {model_id!r} "
+        f"(too many fingerprint collisions for prefix {prefix!r})."
+    )
 
 
 def build_training_config(
@@ -94,15 +122,22 @@ def build_training_config(
     experiment_config: dict[str, Any],
     model_class: str,
     model_config: dict[str, Any],
-    stage_epochs: int = 3,
+    stage_epochs: int = 1,
     base_lr: float = 1e-3,
     batch_size: int = 1,
     seed: int = 3003,
     activation: str = "relu",
     checkpoint_cadence: str = "every_epoch",
-    disable_cp_stage_switch: bool = False,
+    save_model_cp: bool = False,
+    he_init: int | str | float = 3,
+    init_epsilon: float = 1e-10,
+    internal_keep_tensors: bool = False,
+    trials: int = 3,
+    trial_variability: str = "",
 ) -> dict[str, Any]:
     parse_checkpoint_cadence(checkpoint_cadence)
+    if trials < 1:
+        raise ValueError(f"trials must be a positive integer, got {trials}")
     config: dict[str, Any] = {
         "experiment_class": experiment_class,
         "experiment_config": experiment_config,
@@ -114,8 +149,12 @@ def build_training_config(
         "seed": seed,
         "activation": activation,
         "checkpoint_cadence": checkpoint_cadence,
-        "disable_cp_stage_switch": disable_cp_stage_switch,
-        "framework_version": FRAMEWORK_VERSION,
+        "save_model_cp": save_model_cp,
+        "he_init": he_init,
+        "init_epsilon": init_epsilon,
+        "internal_keep_tensors": internal_keep_tensors,
+        "trials": trials,
+        "trial_variability": trial_variability,
     }
     config["training_config_fingerprint"] = compute_fingerprint(config)
     return config
@@ -125,44 +164,43 @@ class ConfigConflictError(Exception):
     """Raised when an incoming config conflicts with a stored one."""
 
 
-def _diff_configs(
+def _diff_fingerprint_payloads(
     incoming: dict[str, Any],
     stored: dict[str, Any],
-    keys: list[str],
 ) -> list[str]:
+    pin = fingerprint_payload(incoming)
+    pst = fingerprint_payload(stored)
     diffs: list[str] = []
-    for k in keys:
-        v_in = incoming.get(k)
-        v_st = stored.get(k)
+    for k in sorted(set(pin) | set(pst)):
+        v_in = pin.get(k)
+        v_st = pst.get(k)
         if v_in != v_st:
             diffs.append(f"  {k}: incoming={v_in!r}  stored={v_st!r}")
     return diffs
 
 
-def guard_training_config(
-    results_dir: Path,
-    config: dict[str, Any],
-    *,
-    force: bool = False,
-) -> None:
-    """Check that *config* is compatible with any previously stored config.
+def guard_training_config(results_dir: Path, config: dict[str, Any]) -> None:
+    """Check that *config* matches any previously stored training config on disk.
 
-    Raises ConfigConflictError on mismatch unless *force* is True.
+    Always raises ConfigConflictError on fingerprint-payload mismatch (``--force`` does
+    not bypass this; it only affects optimizer reruns and optimizer config guards).
     """
     config_path = results_dir / "config.json"
     if not config_path.exists():
         return
 
-    stored = json.loads(config_path.read_text())
-    diffs = _diff_configs(config, stored, TRAINING_CONFIG_KEYS)
+    stored = dict(json.loads(config_path.read_text()))
+    stored.setdefault("save_model_cp", False)
+    if fingerprint_payload(config) == fingerprint_payload(stored):
+        return
 
-    if diffs and not force:
-        msg = (
-            f"Incoming training config conflicts with stored config at "
-            f"{config_path}:\n" + "\n".join(diffs) + "\n"
-            "Use --force to overwrite."
-        )
-        raise ConfigConflictError(msg)
+    diffs = _diff_fingerprint_payloads(config, stored)
+    msg = (
+        f"Incoming training config conflicts with stored config at "
+        f"{config_path}:\n" + "\n".join(diffs) + "\n"
+        "Training config mismatches cannot be overridden with --force."
+    )
+    raise ConfigConflictError(msg)
 
 
 def guard_optimizer_config(

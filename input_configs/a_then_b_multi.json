@@ -14,5 +14,11 @@
     "batch_size": 4,
     "seed": 3003,
     "activation": "relu",
-    "checkpoint_cadence": "20 its"
+    "he_init": "all",
+    "init_epsilon": 1e-8,
+    "checkpoint_cadence": "20 its",
+    "device": "cuda",
+    "internal_keep_tensors": true,
+    "trials": 3,
+    "trial_variability": "change_digits"
 }

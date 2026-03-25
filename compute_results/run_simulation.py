@@ -1,6 +1,21 @@
 #!/usr/bin/env python3
 """Main entrypoint for running training simulations.
 
+Results are written under::
+
+    results/<experiment_id>/<result_id>/<model_id>/
+
+where ``result_id`` is the first six hex characters of a SHA-256 fingerprint of the
+training config (with a numeric suffix if that prefix collides with a different config).
+
+Use ``all`` as a model or optimizer token (JSON or CLI) to include every name in the
+corresponding registry (sorted). You can combine with explicit names, e.g. ``adam,all``,
+to union shorthands with all registered extractors.
+
+``--force`` re-runs requested optimizers even when outputs already exist. Training
+config mismatches against an existing ``config.json`` are never overridden; fix the
+config or use a different run directory (different training fingerprint).
+
 Usage examples
 --------------
 From a config file::
@@ -14,32 +29,22 @@ With explicit arguments::
         --digitA 1 --digitB 2 \
         --model DNN5Hidden64 \
         --optimizer sgd \
-        --stage-epochs 3 --base-lr 1e-3 --batch-size 1 --seed 3003
+        --stage-epochs 1 --base-lr 1e-3 --batch-size 1 --seed 3003
 
 Multiple optimizers/models/experiments (CSV lists)::
 
     uv run run-simulation --experiment Exp1,Exp2 --model M1,M2 --optimizer adam,adagrad
-
-Use ``all`` as a model or optimizer token (JSON or CLI) to include every name in the
-corresponding registry (sorted). You can combine with explicit names, e.g. ``adam,all``,
-to union shorthands with all registered extractors.
-
-Add ``--force`` to overwrite existing results. Use ``--parallel K`` to run K simulations
-in parallel.
 """
-
-from __future__ import annotations
 
 import argparse
 import itertools
 import json
-import multiprocessing
 import sys
-from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 
 import torch
+import traceback
 
 # Ensure the project root is on sys.path so bare package imports work when
 # the script is invoked directly (e.g. ``python compute_results/run_simulation.py``).
@@ -55,6 +60,7 @@ from compute_results.config_guard import (
     guard_training_config,
     load_existing_optimizer_ids,
     optimizer_has_results,
+    result_id_for_config,
     save_config,
     save_metadata,
     save_optimizer_config,
@@ -62,8 +68,9 @@ from compute_results.config_guard import (
 from compute_results.defaults import OPTIMIZER_LR_KEY, SHAMPOO_PRECONDITIONER_EPSILON_KEY
 from compute_results.training_loop import train_with_config
 from experiments import get_experiment, list_experiments
-from models import apply_xavier_init, get_model, list_models
+from models import apply_model_weight_init, get_model, list_models, validate_he_init
 from optimizers import get_extractor, list_extractors
+
 
 RESULTS_ROOT = _PROJECT_ROOT / "results"
 
@@ -158,26 +165,24 @@ def _run_single_task(
     if str(project_root) not in sys.path:
         sys.path.insert(0, str(project_root))
 
-    import torch as _torch
-
-    from compute_results.training_loop import train_with_config
-    from experiments import get_experiment
-    from models import apply_xavier_init, get_model
-    from optimizers import get_extractor
-
     t = task
     experiment = get_experiment(t.experiment_class, **t.experiment_kwargs)
     model = get_model(t.model_class, **t.model_kwargs)
     extractor = get_extractor(t.optimizer_class, **t.optimizer_kwargs)
 
-    _torch.manual_seed(t.seed)
-    apply_xavier_init(model)
+    torch.manual_seed(t.seed)
+    apply_model_weight_init(
+        model,
+        he_init=t.config["he_init"],
+        init_epsilon=float(t.config["init_epsilon"]),
+        activation=t.config.get("activation", "relu"),
+    )
 
-    num_gpus = _torch.cuda.device_count()
+    num_gpus = torch.cuda.device_count()
     if num_gpus > 0:
-        device = _torch.device(f"cuda:{device_id % num_gpus}")
+        device = torch.device(f"cuda:{device_id % num_gpus}")
     else:
-        device = _torch.device("cpu")
+        device = torch.device("cpu")
 
     try:
         train_with_config(
@@ -195,7 +200,7 @@ def _run_single_task(
             True,
         )
     except Exception as e:
-        print(f"Task failed: {t.experiment_class}/{t.model_class}/{t.optimizer_name}: {e}")
+        print(f"{traceback.format_exc()}\nTask failed: {t.experiment_class}/{t.model_class}/{t.optimizer_name}: {e}")
         return (
             experiment.experiment_id(),
             model.model_id(),
@@ -236,12 +241,34 @@ def _parse_args() -> argparse.Namespace:
         default=0.25,
         help="Pretrain base subset ratio (0-1). Used by Pretrain25ThenDigitAThenDigitB_25_75.",
     )
-    p.add_argument("--stage-epochs", type=int, default=3)
+    p.add_argument("--stage-epochs", type=int, default=1)
     p.add_argument("--base-lr", type=float, default=1e-3)
     p.add_argument("--batch-size", type=int, default=1)
     p.add_argument("--seed", type=int, default=3003)
     p.add_argument("--activation", default="relu")
+    p.add_argument(
+        "--he-init",
+        type=str,
+        default="3",
+        metavar="K",
+        help=(
+            "First K Linear/Conv layers use He (Kaiming) init; 0 = all random "
+            "(N(0, init_epsilon)); 'all' or a negative value = He for all layers."
+        ),
+    )
+    p.add_argument(
+        "--init-epsilon",
+        type=float,
+        default=1e-12,
+        metavar="VAR",
+        help="Variance for Gaussian init of non-He weights/biases (mean 0).",
+    )
     p.add_argument("--checkpoint-cadence", default="every_epoch")
+    p.add_argument(
+        "--save-model-cp",
+        action="store_true",
+        help="Write model state_dict to checkpoints/<tag>.pt at each checkpoint.",
+    )
     p.add_argument(
         "--shampoo-preconditioner-epsilon",
         type=float,
@@ -254,16 +281,34 @@ def _parse_args() -> argparse.Namespace:
         ),
     )
     p.add_argument(
-        "--force",
+        "--internal-keep-tensors",
         action="store_true",
-        help="Overwrite existing results even if they exist.",
+        help="Keep checkpoint activations as GPU tensors; flush to numpy only when >6 GB.",
     )
     p.add_argument(
-        "--parallel",
+        "--trials",
         type=int,
-        default=1,
-        metavar="K",
-        help="Run up to K simulations in parallel (default: 1).",
+        default=3,
+        help="Number of trials (full stage-sequence repetitions). Default: 3.",
+    )
+    p.add_argument(
+        "--trial-variability",
+        type=str,
+        default="",
+        metavar="VARIABILITY_TYPE",
+        help=(
+            "Variability applied between trials, interpreted per experiment. "
+            "Supported: 'change_digits' (shift digit labels by +2 mod n_digits//2). "
+            "Default: '' (no change)."
+        ),
+    )
+    p.add_argument(
+        "--force",
+        action="store_true",
+        help=(
+            "Re-run all requested optimizers even if outputs already exist. "
+            "Does not override a mismatched training config.json."
+        ),
     )
     p.add_argument(
         "--device",
@@ -287,13 +332,18 @@ def main() -> int:
             model_kwargs["activation"] = raw.get("activation", "relu")
         optimizer_names = _parse_csv(raw["optimizer"])
         base_lr = raw.get("base_lr", 1e-3)
-        stage_epochs = raw.get("stage_epochs", 3)
+        stage_epochs = raw.get("stage_epochs", 1)
         batch_size = raw.get("batch_size", 1)
         seed = raw.get("seed", 3003)
         activation = raw.get("activation", "relu")
         checkpoint_cadence = raw.get("checkpoint_cadence", "every_epoch")
+        save_model_cp = bool(raw.get("save_model_cp", False)) or args.save_model_cp
+        he_init = raw.get("he_init", 3)
+        init_epsilon = float(raw.get("init_epsilon", 1e-10))
+        internal_keep_tensors = bool(raw.get("internal_keep_tensors", False)) or args.internal_keep_tensors
+        trials = int(raw.get("trials", args.trials))
+        trial_variability = str(raw.get("trial_variability", args.trial_variability))
         force = raw.get("force", False) or args.force
-        parallel = raw.get("parallel", args.parallel)
     else:
         if not (args.experiment and args.model and args.optimizer):
             print(
@@ -316,8 +366,13 @@ def main() -> int:
         seed = args.seed
         activation = args.activation
         checkpoint_cadence = args.checkpoint_cadence
+        save_model_cp = args.save_model_cp
+        he_init = args.he_init
+        init_epsilon = args.init_epsilon
+        internal_keep_tensors = args.internal_keep_tensors
+        trials = args.trials
+        trial_variability = args.trial_variability
         force = args.force
-        parallel = args.parallel
         raw = {}  # no JSON; CLI-only path
 
     opt_extra_kwargs: dict = {}
@@ -340,6 +395,15 @@ def main() -> int:
         print(f"ERROR: {e}", file=sys.stderr)
         sys.exit(1)
 
+    try:
+        validate_he_init(he_init)
+    except (TypeError, ValueError) as e:
+        print(f"ERROR: Invalid --he-init / he_init: {e}", file=sys.stderr)
+        sys.exit(1)
+    if init_epsilon < 0:
+        print("ERROR: init_epsilon must be non-negative.", file=sys.stderr)
+        sys.exit(1)
+
     _validate_names(experiment_classes, model_classes, optimizer_names)
 
     # Build cartesian product of tasks
@@ -354,8 +418,6 @@ def main() -> int:
 
         experiment = get_experiment(exp_cls, **exp_kw)
         model = get_model(mod_cls, **mod_kw)
-        results_dir = RESULTS_ROOT / experiment.experiment_id() / model.model_id()
-
         config = build_training_config(
             experiment_class=exp_cls,
             experiment_config=exp_kw,
@@ -367,7 +429,20 @@ def main() -> int:
             seed=seed,
             activation=mod_kw.get("activation", activation),
             checkpoint_cadence=checkpoint_cadence,
+            save_model_cp=save_model_cp,
+            he_init=he_init,
+            init_epsilon=init_epsilon,
+            internal_keep_tensors=internal_keep_tensors,
+            trials=trials,
+            trial_variability=trial_variability,
         )
+        exp_dir = RESULTS_ROOT / experiment.experiment_id()
+        rid = result_id_for_config(
+            config,
+            experiment_dir=exp_dir,
+            model_id=model.model_id(),
+        )
+        results_dir = exp_dir / rid / model.model_id()
 
         opt_class, opt_kwargs = _resolve_optimizer(
             opt_name, base_lr, **opt_extra_kwargs
@@ -389,7 +464,7 @@ def main() -> int:
 
     # Filter: skip existing unless force
     to_run: list[_Task] = []
-    skipped: list[tuple[str, str, str]] = []
+    skipped: list[tuple[str, str, str, str]] = []
     for task in all_tasks:
         opt_dir = task.optimizer_dir
         if optimizer_has_results(opt_dir):
@@ -401,7 +476,8 @@ def main() -> int:
                 )
                 skipped.append(
                     (
-                        task.results_dir.parent.name,  # experiment_id
+                        task.results_dir.parent.parent.name,  # experiment_id
+                        task.results_dir.parent.name,  # result_id
                         task.results_dir.name,  # model_id
                         extractor.optimizer_id(),
                     )
@@ -415,8 +491,8 @@ def main() -> int:
             "(use --force to overwrite):",
             file=sys.stderr,
         )
-        for exp_id, mod_id, opt_id in skipped:
-            print(f"  - {exp_id} / {mod_id} / {opt_id}", file=sys.stderr)
+        for exp_id, rid, mod_id, opt_id in skipped:
+            print(f"  - {exp_id} / {rid} / {mod_id} / {opt_id}", file=sys.stderr)
 
     if not to_run:
         print("Nothing to run. All requested combinations already have results.")
@@ -432,7 +508,7 @@ def main() -> int:
         results_dir = task.results_dir
         config = task.config
         try:
-            guard_training_config(results_dir, config, force=force)
+            guard_training_config(results_dir, config)
         except ConfigConflictError as e:
             print(f"CONFIG CONFLICT:\n{e}", file=sys.stderr)
             sys.exit(1)
@@ -468,32 +544,14 @@ def main() -> int:
             optimizer_ids=merged,
         )
 
-    # Run tasks
-    if parallel <= 1:
-        for i, task in enumerate(to_run):
-            device_id = i % max(1, torch.cuda.device_count())
-            print(
-                f"Training: {task.experiment_class} / {task.model_class} / "
-                f"{task.optimizer_name}  device={device_id}"
-            )
-            _run_single_task(task, device_id)
-    else:
-        K = min(parallel, len(to_run))
-        print(f"Running {len(to_run)} simulations with {K} parallel workers")
-        ctx = multiprocessing.get_context("spawn")
-        with ProcessPoolExecutor(max_workers=K, mp_context=ctx) as pool:
-            futures = {
-                pool.submit(_run_single_task, task, i): task
-                for i, task in enumerate(to_run)
-            }
-            for future in as_completed(futures):
-                task = futures[future]
-                try:
-                    exp_id, mod_id, opt_id, ok = future.result()
-                    status = "OK" if ok else "FAILED"
-                    print(f"  {exp_id} / {mod_id} / {opt_id}: {status}")
-                except Exception as e:
-                    print(f"  {task.experiment_class}/{task.model_class}/{task.optimizer_name}: {e}")
+    # Run tasks (sequential; one GPU index per task when multiple CUDA devices exist)
+    for i, task in enumerate(to_run):
+        device_id = i % max(1, torch.cuda.device_count())
+        print(
+            f"Training: {task.experiment_class} / {task.model_class} / "
+            f"{task.optimizer_name}  device={device_id}"
+        )
+        _run_single_task(task, device_id)
 
     print("Done. Results saved to:", RESULTS_ROOT)
     return 0

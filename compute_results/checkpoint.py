@@ -25,6 +25,8 @@ def capture_activations(
     model: AnalyzableModel,
     inputs: torch.Tensor,
     device: torch.device,
+    *,
+    keep_on_gpu: bool = False,
 ) -> dict[str, torch.Tensor]:
     """Run a forward pass with hooks and return per-layer activations."""
     activations: dict[str, torch.Tensor] = {}
@@ -32,7 +34,7 @@ def capture_activations(
 
     for layer_name, module in model.hookable_layers().items():
         def _hook(mod, inp, out, name=layer_name):
-            activations[name] = out.detach().cpu()
+            activations[name] = out.detach() if keep_on_gpu else out.detach().cpu()
         hooks.append(module.register_forward_hook(_hook))
 
     model.eval()
@@ -48,42 +50,49 @@ def capture_activations(
 def extract_unit_activations(
     activations: dict[str, torch.Tensor],
     units: list[dict[str, Any]],
-) -> dict[str, np.ndarray]:
+    *,
+    keep_on_gpu: bool = False,
+) -> dict[str, np.ndarray | torch.Tensor]:
     """For each clickable unit, extract all activation values (no reduction)."""
-    result: dict[str, np.ndarray] = {}
+    result: dict[str, np.ndarray | torch.Tensor] = {}
     for u in units:
         layer_act = activations.get(u["layer_name"])
         if layer_act is None:
             continue
         idx = u["unit_index"]
-        if u["unit_type"] == "neuron":
-            val = layer_act[:, idx].detach().cpu().numpy().flatten()
-        elif u["unit_type"] == "channel":
-            val = layer_act[:, idx].detach().cpu().numpy().flatten()
+        if u["unit_type"] in ("neuron", "channel"):
+            if keep_on_gpu:
+                val = layer_act[:, idx].detach().flatten()
+            else:
+                val = layer_act[:, idx].detach().cpu().numpy().flatten()
         else:
             continue
         result[u["node_id"]] = val
     return result
 
 
-def compute_weight_stats(model: AnalyzableModel) -> dict[str, float]:
+def compute_weight_stats(
+    model: AnalyzableModel,
+    *,
+    keep_on_gpu: bool = False,
+) -> dict[str, float]:
     """Compute per-unit weight norms."""
     norms: dict[str, float] = {}
 
-    current_state = {k: v.detach().cpu() for k, v in model.state_dict().items()}
+    state = model.state_dict()
+    if not keep_on_gpu:
+        state = {k: v.detach().cpu() for k, v in state.items()}
     units = model.clickable_units()
 
     for u in units:
         layer_name = u["layer_name"]
         idx = u["unit_index"]
-        param_key = _find_weight_key(current_state, layer_name)
+        param_key = _find_weight_key(state, layer_name)
         if param_key is None:
             continue
 
-        w_current = current_state[param_key]
-        if u["unit_type"] == "neuron":
-            w_vec = w_current[idx].flatten().float()
-        elif u["unit_type"] == "channel":
+        w_current = state[param_key]
+        if u["unit_type"] in ("neuron", "channel"):
             w_vec = w_current[idx].flatten().float()
         else:
             continue
@@ -111,27 +120,52 @@ def _find_weight_key(
 class NeuronTimeseriesCollector:
     """Accumulates per-checkpoint neuron-level data and saves to .npz."""
 
-    def __init__(self, units: list[dict[str, Any]]):
+    _FLUSH_THRESHOLD = 4 * 1024**3  # 6 GB
+
+    def __init__(self, units: list[dict[str, Any]], *, keep_tensors: bool = False):
         self.units = units
+        self.keep_tensors = keep_tensors
         self.checkpoint_tags: list[str] = []
-        self.activations: dict[str, list[np.ndarray]] = {u["node_id"]: [] for u in units}
+        self.activations: dict[str, list[np.ndarray | torch.Tensor]] = {
+            u["node_id"]: [] for u in units
+        }
         self.weight_norms: dict[str, list[float]] = {u["node_id"]: [] for u in units}
+        self._total_tensor_bytes: int = 0
 
     def record(
         self,
         tag: str,
-        act_values: dict[str, np.ndarray],
+        act_values: dict[str, np.ndarray | torch.Tensor],
         norm_values: dict[str, float],
     ) -> None:
         self.checkpoint_tags.append(tag)
         for u in self.units:
             nid = u["node_id"]
-            self.activations[nid].append(
-                act_values[nid] if nid in act_values else np.array([float("nan")])
-            )
+            if nid in act_values:
+                val = act_values[nid]
+                if isinstance(val, torch.Tensor):
+                    self._total_tensor_bytes += val.nelement() * val.element_size()
+            else:
+                val = np.array([float("nan")])
+            self.activations[nid].append(val)
             self.weight_norms[nid].append(norm_values.get(nid, float("nan")))
 
+        if self.keep_tensors:
+            self._maybe_flush()
+
+    def _maybe_flush(self, *, force: bool = False) -> None:
+        """Move GPU tensors to numpy when accumulated size exceeds threshold."""
+        if not force and self._total_tensor_bytes <= self._FLUSH_THRESHOLD:
+            return
+        for nid, vals in self.activations.items():
+            for i, v in enumerate(vals):
+                if isinstance(v, torch.Tensor):
+                    vals[i] = v.detach().cpu().numpy()
+        self._total_tensor_bytes = 0
+
     def save(self, path: Path) -> None:
+        self._maybe_flush(force=True)
+
         data: dict[str, Any] = {
             "checkpoint_tags": np.array(self.checkpoint_tags),
             "unit_node_ids": np.array([u["node_id"] for u in self.units]),

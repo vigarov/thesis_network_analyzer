@@ -1,8 +1,114 @@
 """Base utilities and registry for models."""
 
 import abc
-from typing import Any
+import math
+from typing import Any, cast
+
 import torch.nn as nn
+
+
+def _normalize_he_init(value: Any) -> tuple[bool, int]:
+    """Parse *he_init* into (all_layers, k).
+
+    If *all_layers* is True, every Linear/Conv2d gets He (Kaiming) init.
+    Otherwise the first *k* such modules get He init; the rest use Gaussian
+    noise with variance *init_epsilon* (handled by the caller).
+
+    ``"all"`` or any negative integer means all layers. Non-negative *k* means
+    the first *k* weight layers only.
+    """
+    if isinstance(value, bool):
+        raise ValueError("he_init must not be a boolean")
+    if isinstance(value, str):
+        s = value.strip().lower()
+        if s == "all":
+            return (True, 0)
+        try:
+            iv = int(s, 10)
+        except ValueError as e:
+            raise ValueError(f"Invalid he_init string: {value!r}") from e
+        if iv < 0:
+            return (True, 0)
+        return (False, iv)
+    if isinstance(value, float):
+        if value < 0:
+            return (True, 0)
+        if not value.is_integer():
+            raise ValueError(f"he_init must be integral, got {value!r}")
+        return (False, int(value))
+    if isinstance(value, int):
+        if value < 0:
+            return (True, 0)
+        return (False, value)
+    raise TypeError(f"he_init must be int, str, or float, got {type(value).__name__}")
+
+
+def validate_he_init(value: Any) -> None:
+    """Raise ``ValueError`` or ``TypeError`` if *value* is not usable as ``he_init``."""
+    _normalize_he_init(value)
+
+
+_KAIMING_FOR_ACTIVATION: dict[str, tuple[str, float]] = {
+    "relu": ("relu", 0.0),
+    "leaky_relu": ("leaky_relu", 0.01),
+    "tanh": ("tanh", 0.0),
+    "sigmoid": ("sigmoid", 0.0),
+    "elu": ("relu", 0.0),
+    "gelu": ("relu", 0.0),
+}
+
+
+def _kaiming_nonlinearity(activation: str) -> tuple[str, float]:
+    return _KAIMING_FOR_ACTIVATION.get(activation.lower(), ("relu", 0.0))
+
+
+def apply_model_weight_init(
+    model: nn.Module,
+    *,
+    he_init: Any,
+    init_epsilon: float,
+    activation: str = "relu",
+) -> None:
+    """Initialize Linear/Conv2d weights: first *K* modules Kaiming (He), rest N(0, init_epsilon).
+
+    Traversal order matches ``model.modules()`` (depth-first). Biases are zero for He-init layers and
+    N(0, init_epsilon) for the random-init layers.
+    """
+    if init_epsilon < 0:
+        raise ValueError("init_epsilon must be non-negative")
+    weight_modules = [
+        m for m in model.modules() if isinstance(m, (nn.Linear, nn.Conv2d))
+    ]
+    n = len(weight_modules)
+    all_he, k_req = _normalize_he_init(he_init)
+    if all_he:
+        k_eff = n
+    elif k_req > n:
+        print(
+            f"WARNING: he_init={k_req} exceeds number of weight layers ({n}); "
+            "He-initializing all layers."
+        )
+        k_eff = n
+    else:
+        k_eff = k_req
+
+    nonlin, neg_slope = _kaiming_nonlinearity(activation)
+    std_rand = math.sqrt(init_epsilon)
+
+    for i, m in enumerate(weight_modules):
+        if i < k_eff:
+            nn.init.kaiming_normal_(
+                m.weight,
+                a=neg_slope,
+                mode="fan_in",
+                nonlinearity=cast(Any, nonlin),
+            )
+            if m.bias is not None:
+                nn.init.zeros_(m.bias)
+        else:
+            nn.init.normal_(m.weight, mean=0.0, std=std_rand)
+            if m.bias is not None:
+                nn.init.normal_(m.bias, mean=0.0, std=std_rand)
 
 
 class AnalyzableModel(nn.Module, abc.ABC):
@@ -37,14 +143,6 @@ class AnalyzableModel(nn.Module, abc.ABC):
     def hookable_layers(self) -> dict[str, nn.Module]:
         """Return {layer_name: module} for layers where forward hooks
         should capture activations."""
-
-
-def apply_xavier_init(model: nn.Module) -> None:
-    for m in model.modules():
-        if isinstance(m, (nn.Linear, nn.Conv2d)):
-            nn.init.xavier_uniform_(m.weight)
-            if m.bias is not None:
-                nn.init.zeros_(m.bias)
 
 
 ACTIVATION_MAP: dict[str, type[nn.Module]] = {

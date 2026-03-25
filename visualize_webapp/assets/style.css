@@ -96,6 +96,50 @@ body {
   letter-spacing: -0.01em;
 }
 
+/* -- Training config preview (collapsible) -------------------------------- */
+
+.section-config {
+  padding: 14px 20px;
+  margin-bottom: 18px;
+}
+
+.config-details summary {
+  cursor: pointer;
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: var(--fg-muted);
+  letter-spacing: 0.02em;
+  list-style-position: outside;
+  padding: 2px 0;
+  user-select: none;
+}
+
+.config-details summary:hover {
+  color: var(--accent);
+}
+
+.config-details[open] summary {
+  margin-bottom: 10px;
+  color: var(--fg);
+}
+
+.config-json-pre {
+  font-family: ui-monospace, "Cascadia Code", "SF Mono", Menlo, Consolas, monospace;
+  font-size: 0.76rem;
+  line-height: 1.5;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 12px 14px;
+  overflow-x: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 22rem;
+  overflow-y: auto;
+  color: var(--fg);
+  margin: 0;
+}
+
 /* -- Graphs ----------------------------------------------------------------- */
 
 .graph-row {

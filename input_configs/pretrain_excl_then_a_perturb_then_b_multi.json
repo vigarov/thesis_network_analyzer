@@ -15,5 +15,6 @@
     "base_lr": 0.001,
     "batch_size": 4,
     "seed": 3003,
+    "he_init": 3,
     "checkpoint_cadence": "50 its"
 }

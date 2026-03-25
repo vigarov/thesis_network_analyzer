@@ -8,6 +8,7 @@ Run with::
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 from typing import Any
@@ -15,7 +16,17 @@ from typing import Any
 import numpy as np
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-from dash import Dash, Input, Output, State, callback_context, dcc, html, no_update
+from dash import (
+    Dash,
+    Input,
+    Output,
+    State,
+    callback_context,
+    clientside_callback,
+    dcc,
+    html,
+    no_update,
+)
 # -- Paths --------------------------------------------------------------------
 
 _APP_DIR = Path(__file__).resolve().parent
@@ -54,6 +65,12 @@ _OPT_PAL = {
 }
 
 
+def _hex_to_rgba(hex_color: str, alpha: float) -> str:
+    h = hex_color.lstrip("#")
+    r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+    return f"rgba({r},{g},{b},{alpha})"
+
+
 def _opt_color(oid: str) -> str:
     for prefix, color in _OPT_PAL.items():
         if oid.startswith(prefix):
@@ -85,18 +102,37 @@ def _sort_optimizer_ids(oids: list[str]) -> list[str]:
     return sorted(oids, key=_key)
 
 
+def _sorted_run_ids(runs: dict[str, list[str]]) -> list[str]:
+    return sorted(runs.keys())
+
+
 # -- Data loading (module-level cache) ----------------------------------------
 
 _cache: dict[tuple, Any] = {}
 
 
-def scan_results() -> dict[str, dict[str, list[str]]]:
-    """Return ``{experiment_id: {model_id: [optimizer_id, …]}}``."""
+def _oids_from_optimizers_dir(opt_base: Path) -> list[str]:
+    if not opt_base.is_dir():
+        return []
+    return _sort_optimizer_ids(
+        [
+            d.name
+            for d in opt_base.iterdir()
+            if d.is_dir() and (d / "training_metrics.npz").exists()
+        ]
+    )
+
+
+def scan_results() -> dict[str, dict[str, dict[str, list[str]]]]:
+    """Return ``{experiment_id: {model_id: {run_id: [optimizer_id, …]}}}``.
+
+    Layout: ``results/<experiment_id>/<run_id>/<model_id>/optimizers/<optimizer_id>/``.
+    """
     key = ("__scan__",)
     if key in _cache:
         return _cache[key]
 
-    tree: dict[str, dict[str, list[str]]] = {}
+    tree: dict[str, dict[str, dict[str, list[str]]]] = {}
     if not RESULTS.exists():
         _cache[key] = tree
         return tree
@@ -104,31 +140,59 @@ def scan_results() -> dict[str, dict[str, list[str]]]:
     for exp_dir in sorted(RESULTS.iterdir()):
         if not exp_dir.is_dir():
             continue
-        for model_dir in sorted(exp_dir.iterdir()):
-            if not model_dir.is_dir():
+        eid = exp_dir.name
+        for rid_dir in sorted(exp_dir.iterdir()):
+            if not rid_dir.is_dir():
                 continue
-            opt_base = model_dir / "optimizers"
-            if not opt_base.exists():
-                continue
-            oids = _sort_optimizer_ids(
-                [
-                    d.name
-                    for d in opt_base.iterdir()
-                    if d.is_dir() and (d / "training_metrics.npz").exists()
-                ]
-            )
-            if oids:
-                tree.setdefault(exp_dir.name, {})[model_dir.name] = oids
+            for mid_dir in sorted(rid_dir.iterdir()):
+                if not mid_dir.is_dir():
+                    continue
+                opt_base = mid_dir / "optimizers"
+                if not opt_base.is_dir():
+                    continue
+                oids = _oids_from_optimizers_dir(opt_base)
+                if oids:
+                    rid = rid_dir.name
+                    mid = mid_dir.name
+                    tree.setdefault(eid, {}).setdefault(mid, {})
+                    tree[eid][mid][rid] = oids
 
     _cache[key] = tree
     return tree
 
 
-def _npz(eid: str, mid: str, oid: str, fname: str) -> dict[str, np.ndarray]:
-    key = (fname, eid, mid, oid)
+def _optimizer_npz_path(eid: str, rid: str, mid: str, oid: str, fname: str) -> Path:
+    return RESULTS / eid / rid / mid / "optimizers" / oid / fname
+
+
+def _training_config_path(eid: str, rid: str, mid: str) -> Path:
+    return RESULTS / eid / rid / mid / "config.json"
+
+
+def _format_training_config_text(
+    eid: str | None, mid: str | None, rid: str | None
+) -> str:
+    """Pretty-printed ``config.json`` for the selected run, or a short status message."""
+    if not eid or not mid or rid is None:
+        return "Select experiment, model, and run to view config.json."
+    path = _training_config_path(eid, rid, mid)
+    if not path.is_file():
+        return f"No config.json found.\n{path}"
+    try:
+        raw = path.read_text(encoding="utf-8")
+        data = json.loads(raw)
+    except (OSError, json.JSONDecodeError) as e:
+        return f"Could not read config.json: {e}"
+    return json.dumps(data, indent=2, ensure_ascii=False, default=str)
+
+
+def _npz(
+    eid: str, mid: str, oid: str, fname: str, *, rid: str
+) -> dict[str, np.ndarray]:
+    key = (fname, eid, rid, mid, oid)
     if key in _cache:
         return _cache[key]
-    path = RESULTS / eid / mid / "optimizers" / oid / fname
+    path = _optimizer_npz_path(eid, rid, mid, oid, fname)
     if not path.exists():
         return {}
     data = dict(np.load(str(path), allow_pickle=True))
@@ -136,16 +200,16 @@ def _npz(eid: str, mid: str, oid: str, fname: str) -> dict[str, np.ndarray]:
     return data
 
 
-def _metrics(e: str, m: str, o: str) -> dict[str, np.ndarray]:
-    return _npz(e, m, o, "training_metrics.npz")
+def _metrics(e: str, m: str, o: str, *, rid: str) -> dict[str, np.ndarray]:
+    return _npz(e, m, o, "training_metrics.npz", rid=rid)
 
 
-def _nts(e: str, m: str, o: str) -> dict[str, np.ndarray]:
-    return _npz(e, m, o, "neuron_timeseries.npz")
+def _nts(e: str, m: str, o: str, *, rid: str) -> dict[str, np.ndarray]:
+    return _npz(e, m, o, "neuron_timeseries.npz", rid=rid)
 
 
-def _sigs(e: str, m: str, o: str) -> dict[str, np.ndarray]:
-    return _npz(e, m, o, "signals.npz")
+def _sigs(e: str, m: str, o: str, *, rid: str) -> dict[str, np.ndarray]:
+    return _npz(e, m, o, "signals.npz", rid=rid)
 
 
 # -- Plotly helpers -----------------------------------------------------------
@@ -346,15 +410,16 @@ def _stage_boundaries_from_metrics(
 
 
 def _stage_switch_checkpoint_indices(metrics: dict[str, Any]) -> list[int]:
-    """First checkpoint index of each stage after the first (training enters a new stage)."""
-    names = metrics.get("stage_names")
-    cp_idxs = metrics.get("stage_end_checkpoint_idxs")
-    if names is None or cp_idxs is None:
+    """Checkpoint indices at stage starts, inferred from training_loop tags ``sw_*_entry``."""
+    tags = metrics.get("checkpoint_tags")
+    if tags is None:
         return []
-    n_stages = len(names)
-    if n_stages < 2:
-        return []
-    return [int(cp_idxs[i]) + 1 for i in range(n_stages - 1)]
+    out: list[int] = []
+    for i, t in enumerate(tags):
+        s = str(t)
+        if s.startswith("sw_") and s.endswith("_entry"):
+            out.append(i)
+    return out
 
 
 def _add_stage_boundaries(
@@ -443,15 +508,46 @@ def _add_stage_boundaries(
 # -- Training overview figures ------------------------------------------------
 
 
-def _build_loss(eid: str, mid: str, oids: list[str]) -> go.Figure:
+def _primary_loss_lname(metrics: dict[str, np.ndarray]) -> str | None:
+    """(Priority) pick which loss to show on the loss plot """
+    lnames: list[str] = []
+    prefix = "loss_"
+    # Filter out the prefix
+    for key in sorted(metrics):
+        if not key.startswith(prefix):
+            continue
+        ln = key[len(prefix):]
+        if ln == "all_train_se":
+            continue
+        lnames.append(ln)
+    if not lnames:
+        return None
+    # Priority list
+    for candidate in (
+        "all_train_mean",
+        "all_train",
+        "all_test",
+        "both_test",
+    ):
+        if candidate in lnames:
+            return candidate
+    return lnames[0]
+
+
+def _build_loss(
+    eid: str, mid: str, oids: list[str], *, rid: str
+) -> go.Figure:
     fig = go.Figure()
-    first_m = next((_metrics(eid, mid, o) for o in oids if _metrics(eid, mid, o)), {})
+    first_m = next(
+        (_metrics(eid, mid, o, rid=rid) for o in oids if _metrics(eid, mid, o, rid=rid)),
+        {},
+    )
     tags = [str(t) for t in first_m.get("checkpoint_tags", [])]
     cp_iters = first_m.get("checkpoint_iterations")
     use_iter = cp_iters is not None and len(cp_iters) == len(tags)
 
     for oid in oids:
-        m = _metrics(eid, mid, oid)
+        m = _metrics(eid, mid, oid, rid=rid)
         if not m:
             continue
         m_tags = [str(t) for t in m.get("checkpoint_tags", [])]
@@ -464,10 +560,45 @@ def _build_loss(eid: str, mid: str, oids: list[str]) -> go.Figure:
         col = _opt_color(oid)
         lab = _opt_label(oid)
         hover = [f"iter {int(x)} · {t}" for x, t in zip(m_xs, m_tags)]
+        primary_lname = _primary_loss_lname(m)
         for key in sorted(m):
             if not key.startswith("loss_"):
                 continue
             lname = key[5:]
+            if lname == "all_train_se":
+                # SE is used only for shaded band representing the CI of the mean
+                continue
+            is_primary = lname == primary_lname
+            if not is_primary:
+                continue
+            group = f"{oid}_{lname}"
+            # Confidence band: ±1.96 SE shaded region for all_train_mean
+            se_key = "loss_all_train_se"
+            if lname == "all_train_mean" and se_key in m:
+                mean_vals = np.array(m[key], dtype=float)
+                se_vals = np.array(m[se_key], dtype=float)
+                assert len(mean_vals) == len(se_vals) and len(mean_vals) == len(m_xs)
+                # 0 is nan
+                se_vals[0] = 0.0
+                lower = mean_vals - 1.96 * se_vals
+                upper = mean_vals + 1.96 * se_vals
+                fill_col = _hex_to_rgba(col, 0.5)
+                ci_group = f"{oid}_{lname}_ci"
+                xs_list = list(m_xs)
+                fig.add_trace(
+                    go.Scatter(
+                        x=xs_list + xs_list[::-1],
+                        y=list(upper) + list(lower)[::-1],
+                        fill="tozerox",
+                        fillcolor=fill_col,
+                        line=dict(color="rgba(255,255,255,0)"),
+                        showlegend=True,
+                        hoverinfo="skip",
+                        legendgroup=ci_group,
+                        visible="legendonly",
+                        name=f"{lab} · {lname} - 95% CI",
+                    )
+                )
             fig.add_trace(
                 go.Scatter(
                     x=m_xs,
@@ -479,16 +610,17 @@ def _build_loss(eid: str, mid: str, oids: list[str]) -> go.Figure:
                     line=dict(
                         color=col,
                         width=2,
-                        dash="solid" if "test" in lname else "dot",
+                        dash="solid" if "train" in lname else "dot",
                     ),
                     marker=dict(size=4),
-                    visible=True
-                    if lname in ("all_train")
-                    else "legendonly",
+                    legendgroup=group,
+                    showlegend=True,
+                    visible=True,
                 )
             )
 
     _style(fig, title=dict(text="Loss", font=dict(size=15)), height=380)
+    fig.update_layout(legend=dict(groupclick="togglegroup"))
     if tags:
         ref_xs = np.array(cp_iters, dtype=float) if use_iter else np.arange(len(tags))
         tick_labels = [str(int(x)) for x in ref_xs]
@@ -503,15 +635,20 @@ def _build_loss(eid: str, mid: str, oids: list[str]) -> go.Figure:
     return fig
 
 
-def _build_acc(eid: str, mid: str, oids: list[str]) -> go.Figure:
+def _build_acc(
+    eid: str, mid: str, oids: list[str], *, rid: str
+) -> go.Figure:
     fig = go.Figure()
-    first_m = next((_metrics(eid, mid, o) for o in oids if _metrics(eid, mid, o)), {})
+    first_m = next(
+        (_metrics(eid, mid, o, rid=rid) for o in oids if _metrics(eid, mid, o, rid=rid)),
+        {},
+    )
     tags = [str(t) for t in first_m.get("checkpoint_tags", [])]
     cp_iters = first_m.get("checkpoint_iterations")
     use_iter = cp_iters is not None and len(cp_iters) == len(tags)
 
     for oid in oids:
-        m = _metrics(eid, mid, oid)
+        m = _metrics(eid, mid, oid, rid=rid)
         if not m:
             continue
         m_tags = [str(t) for t in m.get("checkpoint_tags", [])]
@@ -542,7 +679,7 @@ def _build_acc(eid: str, mid: str, oids: list[str]) -> go.Figure:
                         dash="solid" if "test" in aname else "dot",
                     ),
                     marker=dict(size=4),
-                    visible=True if aname in ("both_test", "all_test") else "legendonly",
+                    visible=True if aname in ("all_test") else "legendonly",
                 )
             )
 
@@ -846,15 +983,15 @@ def _signal_at_checkpoints(
 
 
 def _build_neuron_detail_figure(
-    nid: str, eid: str, mid: str, oid: str
+    nid: str, eid: str, mid: str, oid: str, *, rid: str
 ) -> go.Figure:
     """Build one combined figure with shared x-axis: Activation, Weight, Grad norm,
     Cosine similarity (dual y for Adam), Adam moments (Adam only),
     Shampoo preconditioner norm (Shampoo only), Effective LR (Adagrad / grafted Shampoo).
     """
-    nts = _nts(eid, mid, oid)
-    sigs = _sigs(eid, mid, oid)
-    metrics = _metrics(eid, mid, oid)
+    nts = _nts(eid, mid, oid, rid=rid)
+    sigs = _sigs(eid, mid, oid, rid=rid)
+    metrics = _metrics(eid, mid, oid, rid=rid)
     otype = _opt_type(oid)
 
     tags = [str(t) for t in nts.get("checkpoint_tags", [])]
@@ -1223,6 +1360,34 @@ def _serve_layout() -> html.Div:
                         ],
                         className="ctrl",
                     ),
+                    html.Div(
+                        [
+                            html.Label("Run"),
+                            dcc.Dropdown(
+                                id="dd-run",
+                                placeholder="Select run…",
+                                clearable=False,
+                            ),
+                        ],
+                        className="ctrl",
+                    ),
+                ],
+            ),
+            html.Section(
+                className="section section-config",
+                children=[
+                    html.Details(
+                        className="config-details",
+                        open=False,
+                        children=[
+                            html.Summary("Training config (config.json)"),
+                            html.Pre(
+                                id="pre-training-config",
+                                className="config-json-pre",
+                                children=_format_training_config_text(None, None, None),
+                            ),
+                        ],
+                    ),
                 ],
             ),
             # -- section 1: training overview --
@@ -1236,7 +1401,7 @@ def _serve_layout() -> html.Div:
                             dcc.Graph(
                                 id="graph-loss",
                                 figure=_empty(
-                                    "Select experiment & model", 380
+                                    "Select experiment, model & run", 380
                                 ),
                                 className="graph-half",
                             ),
@@ -1322,7 +1487,7 @@ def _serve_layout() -> html.Div:
                     dcc.Store(id="store-slider-autoplay", data=False),
                     dcc.Interval(
                         id="interval-slider-autoplay",
-                        interval=5000,
+                        interval=2500,
                         n_intervals=0,
                         disabled=True,
                         max_intervals=-1,
@@ -1349,6 +1514,8 @@ def _serve_layout() -> html.Div:
             # list of checkpoint iteration numbers (int) for the current optimizer,
             # or null when falling back to checkpoint-index mode
             dcc.Store(id="store-cp-iters", data=None),
+            # Prefetched diagram figures (current + next checkpoints) for client-side hits
+            dcc.Store(id="store-diagram-cache", data=None),
         ],
     )
 
@@ -1374,23 +1541,54 @@ def _cb_models(eid: str | None):
 
 
 @app.callback(
+    Output("dd-run", "options"),
+    Output("dd-run", "value"),
+    Input("dd-experiment", "value"),
+    Input("dd-model", "value"),
+)
+def _cb_run(eid: str | None, mid: str | None):
+    if not eid or not mid:
+        return [], None
+    tree = scan_results()
+    runs = tree.get(eid, {}).get(mid, {})
+    rids = _sorted_run_ids(runs)
+    if not rids:
+        return [], None
+    opts = [{"label": r, "value": r} for r in rids]
+    return opts, (rids[0] if len(rids) == 1 else None)
+
+
+@app.callback(
+    Output("pre-training-config", "children"),
+    Input("dd-experiment", "value"),
+    Input("dd-model", "value"),
+    Input("dd-run", "value"),
+)
+def _cb_training_config_preview(
+    eid: str | None, mid: str | None, rid: str | None
+):
+    return _format_training_config_text(eid, mid, rid)
+
+
+@app.callback(
     Output("graph-loss", "figure"),
     Output("graph-acc", "figure"),
     Output("dd-optimizer", "options"),
     Output("dd-optimizer", "value"),
     Input("dd-experiment", "value"),
     Input("dd-model", "value"),
+    Input("dd-run", "value"),
 )
-def _cb_training(eid: str | None, mid: str | None):
-    if not eid or not mid:
+def _cb_training(eid: str | None, mid: str | None, rid: str | None):
+    if not eid or not mid or rid is None:
         return (
-            _empty("Select experiment & model", 380),
+            _empty("Select experiment, model & run", 380),
             _empty("", 380),
             [],
             None,
         )
     tree = scan_results()
-    oids = tree.get(eid, {}).get(mid, [])
+    oids = tree.get(eid, {}).get(mid, {}).get(rid, [])
     if not oids:
         return (
             _empty("No results yet", 380),
@@ -1400,8 +1598,8 @@ def _cb_training(eid: str | None, mid: str | None):
         )
     opts = [{"label": o, "value": o} for o in oids]
     return (
-        _build_loss(eid, mid, oids),
-        _build_acc(eid, mid, oids),
+        _build_loss(eid, mid, oids, rid=rid),
+        _build_acc(eid, mid, oids, rid=rid),
         opts,
         oids[0] if len(oids) == 1 else None,
     )
@@ -1412,22 +1610,24 @@ def _cb_training(eid: str | None, mid: str | None):
     Output("slider-checkpoint", "marks"),
     Output("slider-checkpoint", "value"),
     Output("slider-checkpoint", "disabled"),
+    Output("slider-checkpoint", "step"),
     Output("store-cp-iters", "data"),
     Input("dd-experiment", "value"),
     Input("dd-model", "value"),
+    Input("dd-run", "value"),
     Input("dd-optimizer", "value"),
 )
 def _cb_slider(
-    eid: str | None, mid: str | None, oid: str | None
+    eid: str | None, mid: str | None, rid: str | None, oid: str | None
 ):
-    if not eid or not mid or not oid:
-        return 0, {}, 0, True, None
-    nts = _nts(eid, mid, oid)
-    metrics = _metrics(eid, mid, oid)
+    if not eid or not mid or rid is None or not oid:
+        return 0, {}, 0, True, 1, None
+    nts = _nts(eid, mid, oid, rid=rid)
+    metrics = _metrics(eid, mid, oid, rid=rid)
     tags = [str(t) for t in nts.get("checkpoint_tags", [])]
     n = len(tags)
     if n == 0:
-        return 0, {}, 0, True, None
+        return 0, {}, 0, True, 1, None
 
     cp_iters_raw = metrics.get("checkpoint_iterations")
     use_iter = cp_iters_raw is not None and len(cp_iters_raw) == n
@@ -1448,38 +1648,35 @@ def _cb_slider(
 
     if use_iter and cp_iters_raw is not None:
         # Slider value space = actual iteration numbers so the tooltip is meaningful.
-        # step=1 lets users drag freely; _cb_diagram snaps to the nearest checkpoint.
         cp_list: list[int] = [int(x) for x in cp_iters_raw]
         slider_max = cp_list[-1]
         slider_val = cp_list[-1]
+        labeled_set = {cp_list[i] for i in labeled_idxs}
 
-        # Marks keyed by iteration value (not checkpoint index).
+        # All checkpoint positions become marks so step=None can snap to them.
+        # Only the sampled subset gets a visible text label.
         marks: dict[int, Any] = {}
-        for idx in labeled_idxs:
-            marks[cp_list[idx]] = {
-                "label": str(cp_list[idx]),
-                "style": label_style,
-            }
+        for it in cp_list:
+            if it in labeled_set:
+                marks[it] = {"label": str(it), "style": label_style}
+            else:
+                marks[it] = {"label": "", "style": {"fontSize": "0px"}}
 
         # Stage-switch ticks: decorate the mark at the matching iteration.
         for sw in _stage_switch_checkpoint_indices(metrics):
             if sw < 0 or sw >= n:
                 continue
             iter_val = cp_list[sw]
-            existing = marks.get(iter_val)
-            if existing and isinstance(existing, dict):
-                lab = existing.get("label", "")
-                st = dict(existing.get("style") or {})
-            else:
-                lab = ""
-                st = {}
-            label_text = f"{stage_tick} {lab}" if lab else stage_tick
+            existing = marks.get(iter_val, {})
+            lab = existing.get("label", "") if isinstance(existing, dict) else ""
+            st = dict(existing.get("style") or {}) if isinstance(existing, dict) else {}
+            label_text = f"{stage_tick} {lab}".strip() if lab else stage_tick
             marks[iter_val] = {"label": label_text, "style": {**st, **stage_style}}
 
-        return slider_max, marks, slider_val, False, cp_list
+        return slider_max, marks, slider_val, False, None, cp_list
 
     else:
-        # Fallback: slider value = checkpoint index (0..n-1).
+        # Fallback: slider value = checkpoint index (0..n-1), step=1.
         marks_idx: dict[int, Any] = {
             i: {"label": tags[i], "style": label_style}
             for i in labeled_idxs
@@ -1495,14 +1692,14 @@ def _cb_slider(
                 marks_idx[sw] = {"label": label_text, "style": {**st, **stage_style}}
             else:
                 marks_idx[sw] = {"label": stage_tick, "style": stage_style}
-        return n - 1, marks_idx, n - 1, False, None
+        return n - 1, marks_idx, n - 1, False, 1, None
 
 
 def _autoplay_step_ms(n_checkpoints: int) -> int:
-    """Milliseconds between checkpoint steps so a full sweep takes ~5s."""
+    """Milliseconds between checkpoint steps so a full sweep takes ~2.5s."""
     if n_checkpoints <= 1:
-        return 5000
-    return max(1, int(round(5000.0 / (n_checkpoints - 1))))
+        return 2500
+    return max(1, int(round(2500.0 / (n_checkpoints - 1))))
 
 
 @app.callback(
@@ -1522,6 +1719,7 @@ def _cb_autoplay_btn_disabled(smax: int):
     Input("btn-slider-autoplay", "n_clicks"),
     Input("dd-experiment", "value"),
     Input("dd-model", "value"),
+    Input("dd-run", "value"),
     Input("dd-optimizer", "value"),
     Input("slider-checkpoint", "max"),
     State("store-slider-autoplay", "data"),
@@ -1532,6 +1730,7 @@ def _cb_autoplay_control(
     n_clicks: int | None,
     eid: str | None,
     mid: str | None,
+    rid: str | None,
     oid: str | None,
     smax: int,
     playing: bool,
@@ -1578,14 +1777,10 @@ def _cb_autoplay_tick(
         return no_update
     if cp_list:
         v = int(val)
-        # Find current position in cp_list and advance to the next checkpoint.
-        try:
-            idx = cp_list.index(v)
-        except ValueError:
-            dists = [abs(x - v) for x in cp_list]
-            idx = dists.index(min(dists))
-        next_idx = (idx + 1) % len(cp_list)
-        return cp_list[next_idx]
+        for it in cp_list:
+            if it > v:
+                return it
+        return cp_list[0]  # wrap around to the beginning
     # Fallback: checkpoint-index mode — advance by 1.
     v = int(val)
     return v + 1 if v < smax else 0
@@ -1615,43 +1810,132 @@ def _slider_val_to_cp_idx(
         return dists.index(min(dists))
 
 
+# Diagram slider: prefetch this many checkpoints (including current) per server response.
+_DIAGRAM_PREFETCH_CP = 10
+
+
+def _slider_value_for_checkpoint_index(
+    cp_idx: int,
+    cp_iters: np.ndarray | None,
+    n_checkpoints: int,
+) -> int:
+    """Slider `value` that selects checkpoint index ``cp_idx`` (iteration or index mode)."""
+    if cp_iters is not None and len(cp_iters) == n_checkpoints:
+        return int(cp_iters[cp_idx])
+    return int(cp_idx)
+
+
+_DIAGRAM_CACHE_CLIENT_JS = r"""
+function(sv, cache, eid, mid, runId, oid) {
+    if (cache === null || cache === undefined) return window.dash_clientside.no_update;
+    if (!cache.figures || !cache.ctx) return window.dash_clientside.no_update;
+    var c = cache.ctx;
+    if (c.e !== eid || c.m !== mid || c.run !== runId) return window.dash_clientside.no_update;
+    var implicit = (oid === null || oid === undefined);
+    if (implicit) {
+        if (!c.implicit) return window.dash_clientside.no_update;
+    } else if (c.r !== oid) {
+        return window.dash_clientside.no_update;
+    }
+    if (sv === null || sv === undefined) return window.dash_clientside.no_update;
+    var k = String(Math.round(Number(sv)));
+    if (Object.prototype.hasOwnProperty.call(cache.figures, k)) {
+        return cache.figures[k];
+    }
+    return window.dash_clientside.no_update;
+}
+"""
+
+
 @app.callback(
     Output("graph-diagram", "figure"),
+    Output("store-diagram-cache", "data"),
     Input("dd-experiment", "value"),
     Input("dd-model", "value"),
+    Input("dd-run", "value"),
     Input("dd-optimizer", "value"),
     Input("slider-checkpoint", "value"),
+    State("store-diagram-cache", "data"),
 )
 def _cb_diagram(
     eid: str | None,
     mid: str | None,
+    rid: str | None,
     oid: str | None,
     slider_val: int | None,
+    prev_store: dict[str, Any] | None,
 ):
-    if eid is None or mid is None:
-        return _empty("Select an experiment & model to view architecture", 200)
+    if eid is None or mid is None or rid is None:
+        return _empty("Select an experiment, model & run to view architecture", 200), None
     tree = scan_results()
-    oids_avail = tree.get(eid, {}).get(mid, [])
+    oids_avail = tree.get(eid, {}).get(mid, {}).get(rid, [])
     if not oids_avail:
-        return _empty("No data available", 200)
+        return _empty("No data available", 200), None
     ref_oid = oid if oid else oids_avail[0]
-    nts = _nts(eid, mid, ref_oid)
+    nts = _nts(eid, mid, ref_oid, rid=rid)
     units = _parse_units(nts)
+    n_cp = len(nts.get("checkpoint_tags", []))
+    m = _metrics(eid, mid, ref_oid, rid=rid)
+    cp_iters = m.get("checkpoint_iterations") if m else None
 
-    checkpoint_idx: int | None = None
-    if slider_val is not None:
-        n = len(nts.get("checkpoint_tags", []))
-        m = _metrics(eid, mid, ref_oid)
-        cp_iters = m.get("checkpoint_iterations") if m else None
-        checkpoint_idx = _slider_val_to_cp_idx(slider_val, cp_iters, n)
+    def _fig_at_checkpoint(ci: int | None) -> go.Figure:
+        return _build_diagram(
+            units,
+            mid,
+            act_nts=nts if oid else None,
+            checkpoint_idx=ci,
+            show_hint=(oid is None),
+        )
 
-    return _build_diagram(
-        units,
-        mid,
-        act_nts=nts if oid else None,
-        checkpoint_idx=checkpoint_idx,
-        show_hint=(oid is None),
-    )
+    if n_cp == 0 or slider_val is None:
+        return _fig_at_checkpoint(None), None
+
+    cp_idx = _slider_val_to_cp_idx(slider_val, cp_iters, n_cp)
+    if cp_idx is None:
+        return _fig_at_checkpoint(None), None
+    new_ctx = {
+        "e": eid,
+        "m": mid,
+        "run": rid,
+        "r": ref_oid,
+        "implicit": oid is None,
+    }
+    prev = prev_store or {}
+    prev_figures: dict[str, Any] = prev.get("figures") or {}
+    ctx_match = prev.get("ctx") == new_ctx
+
+    figures_json: dict[str, Any] = {}
+    for k in range(min(_DIAGRAM_PREFETCH_CP, n_cp)):
+        idx = (cp_idx + k) % n_cp
+        sv_key = _slider_value_for_checkpoint_index(idx, cp_iters, n_cp)
+        key = str(int(sv_key))
+        if ctx_match and key in prev_figures:
+            payload = prev_figures[key]
+        else:
+            payload = _fig_at_checkpoint(idx).to_plotly_json()
+        figures_json[key] = payload
+
+    canon_key = str(int(_slider_value_for_checkpoint_index(cp_idx, cp_iters, n_cp)))
+    skid = str(int(slider_val))
+    if skid != canon_key and canon_key in figures_json:
+        figures_json[skid] = figures_json[canon_key]
+
+    current_fig = go.Figure(figures_json[skid if skid in figures_json else canon_key])
+    store = {"ctx": new_ctx, "figures": figures_json}
+    return current_fig, store
+
+
+clientside_callback(
+    _DIAGRAM_CACHE_CLIENT_JS,
+    Output("graph-diagram", "figure", allow_duplicate=True),
+    Input("slider-checkpoint", "value"),
+    Input("store-diagram-cache", "data"),
+    State("dd-experiment", "value"),
+    State("dd-model", "value"),
+    State("dd-run", "value"),
+    State("dd-optimizer", "value"),
+    prevent_initial_call=True,
+)
 
 
 @app.callback(
@@ -1678,26 +1962,28 @@ def _cb_click(click_data: dict | None):
     Input("dd-optimizer", "value"),
     Input("dd-experiment", "value"),
     Input("dd-model", "value"),
+    Input("dd-run", "value"),
 )
 def _cb_neuron(
     nid: str | None,
     oid: str | None,
     eid: str | None,
     mid: str | None,
+    rid: str | None,
 ):
     hint_default = "Click a node in the diagram above to inspect it."
     empty = _empty("", 100)
-    if nid is None or eid is None or mid is None:
+    if nid is None or eid is None or mid is None or rid is None:
         return empty, hint_default
     if oid is None:
         return empty, "⚠ Select an optimizer above first, then click a node."
 
-    nts = _nts(eid, mid, oid)
+    nts = _nts(eid, mid, oid, rid=rid)
     safe = nid.replace(":", "__")
     if f"act__{safe}" not in nts:
         return empty, hint_default
 
-    fig = _build_neuron_detail_figure(nid, eid, mid, oid)
+    fig = _build_neuron_detail_figure(nid, eid, mid, oid, rid=rid)
     return fig, f"Selected: {nid}"
 
 

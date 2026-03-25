@@ -14,12 +14,36 @@ class StageSpec:
     name: str
     train_loader: DataLoader
     eval_loaders: dict[str, DataLoader] = field(default_factory=dict)
-    is_stage_switch: bool = False
     post_stage_callback: Callable[..., None] | None = field(default=None, repr=False)
+    once_only: bool = False
 
 
 class Experiment(abc.ABC):
     """Abstract base class that every experiment must implement."""
+
+    def __init__(self) -> None:
+        self._stages_built: bool = False
+        self._trial_variability: str = ""
+
+    def set_trial_var(self, trial_variability: str) -> None:
+        """Set the trial variability string before calling build_stages.
+            Must be called before build_stages(). 
+        """
+        if self._stages_built:
+            raise RuntimeError(
+                "set_trial_var() must be called before build_stages(); "
+                "it is invalid after stages have been built."
+            )
+        self._trial_variability = trial_variability
+
+    def to_device(self, device: torch.device) -> None:
+        """Pinning data to device to be done before building stages.
+        """
+        if self._stages_built:
+            raise RuntimeError(
+                "to_device() must be called before build_stages(); "
+                "it is invalid after stages have been built."
+            )
 
     @abc.abstractmethod
     def experiment_id(self) -> str:
@@ -30,13 +54,23 @@ class Experiment(abc.ABC):
         """Return the experiment-specific config fields that are
         optimizer-independent and must be frozen across reruns."""
 
-    @abc.abstractmethod
-    def build_stages(self, batch_size: int, seed: int) -> list[StageSpec]:
+    def build_stages(
+        self, batch_size: int, seed: int, *, num_trials: int
+    ) -> "list[StageSpec] | list[list[StageSpec]]":
         """Construct dataloaders for each training stage.
 
-        Returns an ordered list of StageSpec objects. The training loop
-        iterates through them sequentially.
+        Returns either a flat list[StageSpec] (same stages reused each trial)
+        or a list[list[StageSpec]] (one list per trial; len must equal num_trials).
         """
+        stages = self._build_stages(batch_size, seed, num_trials=num_trials)
+        self._stages_built = True
+        return stages
+
+    @abc.abstractmethod
+    def _build_stages(
+        self, batch_size: int, seed: int, *, num_trials: int
+    ) -> "list[StageSpec] | list[list[StageSpec]]":
+        """Return an ordered list of StageSpec (flat) or one list per trial (nested)."""
 
     @abc.abstractmethod
     def evaluation_inputs(self, device: torch.device) -> tuple[torch.Tensor, torch.Tensor]:

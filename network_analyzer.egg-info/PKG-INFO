@@ -55,7 +55,7 @@ uv run run-simulation \
     --digitA 1 --digitB 2 \
     --model DNN5Hidden64 \
     --optimizer sgd \
-    --stage-epochs 3 --base-lr 1e-3 --batch-size 1 --seed 3003
+    --stage-epochs 1 --base-lr 1e-3 --batch-size 1 --seed 3003
 ```
 
 ### Quick smoke test (1 epoch per stage)
@@ -80,7 +80,7 @@ Add `--force` to overwrite existing incompatible configs.
 | `--optimizer` | N/A | Optimizer: `sgd`, `adam`, `adagrad` |
 | `--digitA` | 1 | First digit for continual learning |
 | `--digitB` | 2 | Second digit for continual learning |
-| `--stage-epochs` | 3 | Epochs per training stage |
+| `--stage-epochs` | 1 | Epochs per training stage |
 | `--base-lr` | 1e-3 | Base learning rate |
 | `--batch-size` | 1 | Batch size |
 | `--seed` | 3003 | Random seed |
@@ -119,7 +119,7 @@ The UI lets you:
     "activation": "relu"
   },
   "optimizer": "adam",
-  "stage_epochs": 3,
+  "stage_epochs": 1,
   "base_lr": 0.001,
   "batch_size": 1,
   "seed": 3003,
@@ -142,7 +142,7 @@ For the pretrain experiment:
     "activation": "relu"
   },
   "optimizer": "adagrad",
-  "stage_epochs": 3,
+  "stage_epochs": 1,
   "base_lr": 0.001,
   "batch_size": 1,
   "seed": 3003,
