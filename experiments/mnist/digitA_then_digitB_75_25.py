@@ -11,7 +11,7 @@ Trials / variability
 --------------------
 - Empty variability (default): flat list returned; same two stages repeat each trial.
 - ``change_digits``: nested list of length ``num_trials``; trial ``t`` uses
-  ``digitA' = (digitA + 2*t) % 5`` and ``digitB' = (digitB + 2*t) % 5``.
+  ``digitA' = (2*digitA + t) % 10`` and ``digitB' = (2*digitB + t) % 10``.
 """
 
 from typing import Any
@@ -87,8 +87,8 @@ class DigitAThenDigitB_75_25(MNISTWrapper):
             per_trial: list[list[StageSpec]] = []
             if variability == "change_digits":
                 for t in range(num_trials):
-                    dA = (self.digitA + 2 * t) % self.N_DIGIT_MOD
-                    dB = (self.digitB + 2 * t) % self.N_DIGIT_MOD
+                    dA = (2*self.digitA + t) % self.N_DIGITS
+                    dB = (2*self.digitB + t) % self.N_DIGITS
                     per_trial.append(
                         _stages_for_digits(self._train_ds, self._test_ds, self._test_by_digit_indices, dA, dB, batch_size, include_all_test=True)
                     )

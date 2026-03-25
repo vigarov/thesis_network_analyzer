@@ -3,3 +3,4 @@ data/
 results/
 local/
 README.md
+*.ipynb_checkpoints

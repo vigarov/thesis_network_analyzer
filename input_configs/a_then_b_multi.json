@@ -1,8 +1,8 @@
 {
     "experiment_class": "DigitAThenDigitB_75_25",
     "experiment_config": {
-        "digitA": 1,
-        "digitB": 2
+        "digitA": 0,
+        "digitB": 1
     },
     "model_class": "DNN5Hidden64",
     "model_config": {
@@ -16,7 +16,7 @@
     "activation": "relu",
     "he_init": "all",
     "init_epsilon": 1e-8,
-    "checkpoint_cadence": "20 its",
+    "checkpoint_cadence": "30 its",
     "device": "cuda",
     "internal_keep_tensors": true,
     "trials": 3,

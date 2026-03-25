@@ -1,8 +1,8 @@
 {
     "experiment_class": "PretrainExclThenDigitAPerturbThenDigitB",
     "experiment_config": {
-        "digitA": 1,
-        "digitB": 2,
+        "digitA": 0,
+        "digitB": 1,
         "base_ratio": 0.25,
         "epsilon_perturbation": 0.01
     },

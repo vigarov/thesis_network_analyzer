@@ -9,8 +9,8 @@ import torch.nn as nn
 
 from compute_results.checkpoint import (
     NeuronTimeseriesCollector,
-    capture_activations,
-    compute_weight_stats,
+    PersistentActivationCapture,
+    extract_unit_weights,
     extract_unit_activations,
     save_model_checkpoint,
 )
@@ -20,7 +20,7 @@ from models.base import AnalyzableModel
 from optimizers.base import OptimizerSignalExtractor
 
 
-NUM_SWITCH_FINEGRAIN_ITS = 10
+NUM_SWITCH_FINEGRAIN_ITS = 20
 
 @torch.no_grad()
 def evaluate(
@@ -57,6 +57,7 @@ def _run_checkpoint(
     checkpoint_dir: Path,
     save_model_cp: bool,
     keep_tensors: bool,
+    persistent_capture: PersistentActivationCapture,
     neuron_collector: NeuronTimeseriesCollector,
     eval_loaders: dict[str, torch.utils.data.DataLoader],
     criterion: nn.Module,
@@ -68,10 +69,10 @@ def _run_checkpoint(
         save_model_checkpoint(model, checkpoint_dir, tag)
 
     eval_inputs, _ = experiment.evaluation_inputs(device)
-    activations = capture_activations(model, eval_inputs, device, keep_on_gpu=keep_tensors)
+    activations = persistent_capture.capture(eval_inputs, device)
     act_values = extract_unit_activations(activations, model.clickable_units(), keep_on_gpu=keep_tensors)
-    norm_values = compute_weight_stats(model, keep_on_gpu=keep_tensors)
-    neuron_collector.record(tag, act_values, norm_values)
+    weight_values = extract_unit_weights(model, keep_on_gpu=keep_tensors)
+    neuron_collector.record(tag, act_values, weight_values)
 
     for loader_name, loader in eval_loaders.items():
         loss, acc = evaluate(model, loader, device, criterion)
@@ -139,6 +140,8 @@ def train_with_config(
     is_nested = isinstance(returned_stages[0], list)
 
     neuron_collector = NeuronTimeseriesCollector(units, keep_tensors=keep_tensors)
+    persistent_capture = PersistentActivationCapture(model, keep_on_gpu=keep_tensors)
+    persistent_capture.install()
     metrics: dict[str, list] = {}
     train_loss_accum: list[float] = []
 
@@ -165,6 +168,7 @@ def train_with_config(
         "checkpoint_dir": checkpoint_dir,
         "save_model_cp": save_model_cp,
         "keep_tensors": keep_tensors,
+        "persistent_capture": persistent_capture,
         "neuron_collector": neuron_collector,
         "eval_loaders": all_eval_loaders,
         "criterion": criterion,
@@ -262,7 +266,8 @@ def train_with_config(
             stage_end_checkpoint_idxs.append(len(metrics["checkpoint_tags"]) - 1)
             stage_end_iterations_list.append(global_iter - 1 if global_iter > 0 else 0)
 
-    # --- Save outputs ---
+    # --- Cleanup hooks and save outputs ---
+    persistent_capture.remove()
     optimizer_dir.mkdir(parents=True, exist_ok=True)
 
     signal_arrays: dict[str, Any] = {

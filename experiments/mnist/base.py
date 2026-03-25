@@ -56,10 +56,8 @@ class MNISTWrapper(Experiment):
 
     #: Number of digit classes in MNIST (0--9).
     N_DIGITS: int = 10
-    #: Modulus used for ``change_digits`` trial variability: ``N_DIGITS // 2``.
-    N_DIGIT_MOD: int = N_DIGITS // 2
 
-    def __init__(self, digitA: int = 1, digitB: int = 2, **kwargs):
+    def __init__(self, digitA: int = 0, digitB: int = 1, **kwargs):
         super().__init__()
         self.digitA = digitA
         self.digitB = digitB

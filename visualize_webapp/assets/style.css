@@ -258,6 +258,98 @@ body {
   margin-top: 4px;
 }
 
+.neuron-smooth-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 16px;
+}
+
+.neuron-smooth-label {
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--fg-muted);
+  margin: 0;
+  flex-shrink: 0;
+}
+
+.neuron-smooth-control {
+  display: flex;
+  flex-direction: row;
+  flex-wrap: nowrap;
+  align-items: stretch;
+  width: fit-content;
+  max-width: 100%;
+}
+
+/* Constrain Dash input wrapper so spin buttons stay on the right, not wrapped below. */
+.neuron-smooth-input-wrap {
+  flex: 0 0 auto;
+  width: 4.25rem;
+  min-width: 4.25rem;
+  max-width: 4.25rem;
+  display: flex;
+  align-items: stretch;
+}
+
+.neuron-smooth-input-wrap > * {
+  width: 100% !important;
+  max-width: 100% !important;
+  min-width: 0;
+  box-sizing: border-box;
+}
+
+.neuron-smooth-input {
+  width: 100%;
+  font-family: var(--font);
+  font-size: 0.85rem;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius) 0 0 var(--radius);
+  border-right: none;
+  background: var(--bg-card);
+  color: var(--fg);
+}
+
+.neuron-spin-stack {
+  display: flex;
+  flex-direction: column;
+  flex-wrap: nowrap;
+  flex: 0 0 auto;
+  align-self: stretch;
+  border: 1px solid var(--border);
+  border-radius: 0 var(--radius) var(--radius) 0;
+  overflow: hidden;
+  background: var(--bg-card);
+}
+
+.neuron-spin-btn {
+  flex: 1;
+  margin: 0;
+  padding: 0 8px;
+  min-height: 1.25rem;
+  line-height: 1;
+  font-size: 0.65rem;
+  font-family: var(--font);
+  border: none;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-card);
+  color: var(--fg-muted);
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s;
+}
+
+.neuron-spin-stack .neuron-spin-btn:last-child {
+  border-bottom: none;
+}
+
+.neuron-spin-btn:hover {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+
 .slider-label {
   display: block;
   font-size: 0.75rem;

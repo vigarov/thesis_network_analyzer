@@ -61,8 +61,8 @@ class Pretrain25ThenDigitAThenDigitB_25_75(MNISTWrapper):
 
     def __init__(
         self,
-        digitA: int = 1,
-        digitB: int = 2,
+        digitA: int = 0,
+        digitB: int = 1,
         base_ratio: float = 0.25,
         **kwargs,
     ):
@@ -161,8 +161,8 @@ class Pretrain25ThenDigitAThenDigitB_25_75(MNISTWrapper):
             per_trial: list[list[StageSpec]] = [t0_list]
             if variability == "change_digits":
                 for t in range(num_trials-1):
-                    dA = (self.digitA + 2 * t) % self.N_DIGIT_MOD
-                    dB = (self.digitB + 2 * t) % self.N_DIGIT_MOD
+                    dA = (2*self.digitA + t) % self.N_DIGITS
+                    dB = (2*self.digitB + t) % self.N_DIGITS
                     stage_b, stage_c = self._digit_stages(None,remaining_indices_by_digit, dA, dB, batch_size)
                     per_trial.append([stage_b, stage_c])
         return per_trial

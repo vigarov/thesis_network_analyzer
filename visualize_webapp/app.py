@@ -982,8 +982,160 @@ def _signal_at_checkpoints(
     return np.array(vals)
 
 
+def _rolling_mean_95ci(y: np.ndarray, window: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Centered rolling mean over exactly `window` checkpoints and 95% CI for that mean.
+
+    Indices where a full window does not fit (series ends) or any value in the window
+    is non-finite are left NaN so those checkpoints are not plotted.
+    CI uses mean ± 1.96 * s / sqrt(w) (sample std s, w points in window).
+    """
+    y = np.asarray(y, dtype=float)
+    n = len(y)
+    w = max(1, int(window))
+    mean = np.full(n, np.nan)
+    lower = np.full(n, np.nan)
+    upper = np.full(n, np.nan)
+    z = 1.96
+    if w == 1:
+        mean = y.copy()
+        lower = np.where(np.isfinite(y), y, np.nan)
+        upper = lower.copy()
+        return mean, lower, upper
+
+    half_lo = (w - 1) // 2
+    half_hi = w - 1 - half_lo
+    for i in range(n):
+        j0 = i - half_lo
+        j1 = i + half_hi + 1
+        if j0 < 0 or j1 > n:
+            continue
+        seg = y[j0:j1]
+        if seg.shape[0] != w or np.any(~np.isfinite(seg)):
+            continue
+        m = float(np.mean(seg))
+        mean[i] = m
+        sd = float(np.std(seg, ddof=1))
+        half = z * sd / np.sqrt(w)
+        lower[i] = m - half
+        upper[i] = m + half
+    return mean, lower, upper
+
+
+def _true_index_runs(mask: np.ndarray) -> list[tuple[int, int]]:
+    """Contiguous [start, end) index intervals where mask is True."""
+    idx = np.flatnonzero(mask)
+    if idx.size == 0:
+        return []
+    runs: list[tuple[int, int]] = []
+    s = int(idx[0])
+    prev = s
+    for k in idx[1:]:
+        k = int(k)
+        if k != prev + 1:
+            runs.append((s, prev + 1))
+            s = k
+        prev = k
+    runs.append((s, prev + 1))
+    return runs
+
+
+def _add_neuron_smoothed_series(
+    fig: go.Figure,
+    *,
+    row: int,
+    secondary_y: bool,
+    x: np.ndarray,
+    y: np.ndarray,
+    name: str,
+    color: str,
+    hover: list[str],
+    legend: str,
+    smooth_window: int,
+) -> None:
+    y_arr = np.asarray(y, dtype=float)
+    if np.all(np.isnan(y_arr)):
+        return
+    w = max(1, int(smooth_window))
+    group = f"neuron_ts_r{row}_{name}"
+    group = "".join(c if c.isalnum() else "_" for c in group)
+
+    trace_kw: dict[str, Any] = dict(row=row, col=1)
+    if secondary_y:
+        trace_kw["secondary_y"] = True
+
+    if w == 1:
+        fig.add_trace(
+            go.Scatter(
+                x=x,
+                y=y_arr,
+                mode="lines+markers",
+                name=name,
+                legend=legend,
+                legendgroup=group,
+                text=hover,
+                hoverinfo="text+y",
+                line=dict(color=color, width=2),
+                marker=dict(size=5),
+            ),
+            **trace_kw,
+        )
+        return
+
+    y_mean, y_lo, y_hi = _rolling_mean_95ci(y_arr, w)
+    mask = np.isfinite(y_mean)
+    if not np.any(mask):
+        return
+    fill_col = _hex_to_rgba(color, 0.5)
+    ci_name = f"{name} - 95% CI"
+    for run_i, (a, b) in enumerate(_true_index_runs(mask)):
+        sl = slice(a, b)
+        x_seg = x[sl]
+        y_m = y_mean[sl]
+        y_hi_s = y_hi[sl]
+        y_lo_s = y_lo[sl]
+        xs_list = list(x_seg)
+        h_seg = hover[a:b]
+        fig.add_trace(
+            go.Scatter(
+                x=xs_list + xs_list[::-1],
+                y=list(y_hi_s) + list(y_lo_s)[::-1],
+                fill="tozerox",
+                fillcolor=fill_col,
+                line=dict(color="rgba(255,255,255,0)"),
+                showlegend=run_i == 0,
+                hoverinfo="skip",
+                legendgroup=group,
+                name=ci_name,
+                legend=legend,
+            ),
+            **trace_kw,
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=x_seg,
+                y=y_m,
+                mode="lines+markers",
+                name=name,
+                legend=legend,
+                legendgroup=group,
+                showlegend=run_i == 0,
+                text=h_seg,
+                hoverinfo="text+y",
+                line=dict(color=color, width=2),
+                marker=dict(size=5),
+            ),
+            **trace_kw,
+        )
+
+
 def _build_neuron_detail_figure(
-    nid: str, eid: str, mid: str, oid: str, *, rid: str
+    nid: str,
+    eid: str,
+    mid: str,
+    oid: str,
+    *,
+    rid: str,
+    smooth_window: int = 1,
 ) -> go.Figure:
     """Build one combined figure with shared x-axis: Activation, Weight, Grad norm,
     Cosine similarity (dual y for Adam), Adam moments (Adam only),
@@ -1029,7 +1181,7 @@ def _build_neuron_detail_figure(
     if has_eff_lr:
         specs.append([{}])
 
-    subplot_titles = ["Activation", "Weight Evolution"]
+    subplot_titles = ["Activation", r"Weight Change (mean $\frac{|\Delta w|}{|w|}$)"]
     if has_grad_cos:
         subplot_titles.extend(["Grad norm", "Cosine similarity"])
     if has_adam_moments:
@@ -1067,39 +1219,50 @@ def _build_neuron_detail_figure(
             act_1d = np.mean(act_arr, axis=tuple(range(1, act_arr.ndim)))
         else:
             act_1d = act_arr
-        fig.add_trace(
-            go.Scatter(
-                x=x_iters,
-                y=act_1d,
-                mode="lines+markers",
-                name="Activation",
-                legend=_legend_for_row(row),
-                text=hover,
-                hoverinfo="text+y",
-                line=dict(color=C["blue"], width=2),
-                marker=dict(size=5),
-            ),
+        _add_neuron_smoothed_series(
+            fig,
             row=row,
-            col=1,
+            secondary_y=False,
+            x=x_iters,
+            y=act_1d,
+            name="Activation",
+            color=C["blue"],
+            hover=hover,
+            legend=_legend_for_row(row),
+            smooth_window=smooth_window,
         )
     row += 1
 
-    # Row 2: Weight
-    if f"wnorm__{safe}" in nts:
-        fig.add_trace(
-            go.Scatter(
-                x=x_iters,
-                y=nts[f"wnorm__{safe}"],
-                mode="lines+markers",
-                name="Weight norm",
-                legend=_legend_for_row(row),
-                text=hover,
-                hoverinfo="text+y",
-                line=dict(color=C["accent"], width=2),
-                marker=dict(size=5),
-            ),
+    # Row 2: Weight Evolution (mean normalized delta w)
+    weights_key = f"weights__{safe}"
+    if weights_key in nts:
+        weights = nts[weights_key]
+        # weights shape: (num_checkpoints, weight_vector_size)
+        assert weights.ndim == 2, f"Expected weights shape (num_checkpoints, weight_vector_size), got {weights.shape}"
+        # Compute mean normalized delta: mean_k( |w_k(t) - w_k(t-1)| / |w_k(t-1)| )
+        n_cp = weights.shape[0]
+        mean_norm_delta = np.full(n_cp, np.nan)
+        for t in range(1, n_cp):
+            w_prev = weights[t - 1].astype(np.float64)
+            w_curr = weights[t].astype(np.float64)
+            abs_prev = np.abs(w_prev)
+            # Avoid division by zero: only include weights where |w(t-1)| > eps
+            eps = 1e-12
+            valid_mask = abs_prev > eps
+            if np.any(valid_mask):
+                deltas = np.abs(w_curr[valid_mask] - w_prev[valid_mask]) / abs_prev[valid_mask]
+                mean_norm_delta[t] = float(np.mean(deltas))
+        _add_neuron_smoothed_series(
+            fig,
             row=row,
-            col=1,
+            secondary_y=False,
+            x=x_iters,
+            y=mean_norm_delta,
+            name=r"Mean rel. $\Delta w$",
+            color=C["accent"],
+            hover=hover,
+            legend=_legend_for_row(row),
+            smooth_window=smooth_window,
         )
     row += 1
 
@@ -1108,22 +1271,18 @@ def _build_neuron_detail_figure(
         if ci >= 0:
             sname, slabel, scolor = _GRAD_NORM_SIG
             y = _signal_at_checkpoints(sigs, sname, ci, x_iters)
-            if not np.all(np.isnan(y)):
-                fig.add_trace(
-                    go.Scatter(
-                        x=x_iters,
-                        y=y,
-                        mode="lines+markers",
-                        name=slabel,
-                        legend=_legend_for_row(row),
-                        text=hover,
-                        hoverinfo="text+y",
-                        line=dict(color=scolor, width=2),
-                        marker=dict(size=5),
-                    ),
-                    row=row,
-                    col=1,
-                )
+            _add_neuron_smoothed_series(
+                fig,
+                row=row,
+                secondary_y=False,
+                x=x_iters,
+                y=y,
+                name=slabel,
+                color=scolor,
+                hover=hover,
+                legend=_legend_for_row(row),
+                smooth_window=smooth_window,
+            )
         row += 1
 
     # Row 4: Cosine similarity (grad + 1st moment for Adam with secondary y)
@@ -1131,68 +1290,54 @@ def _build_neuron_detail_figure(
         if ci >= 0:
             for sname, slabel, scolor, sec_y in _COSINE_SIM_SIGS.get(otype, []):
                 y = _signal_at_checkpoints(sigs, sname, ci, x_iters)
-                if not np.all(np.isnan(y)):
-                    fig.add_trace(
-                        go.Scatter(
-                            x=x_iters,
-                            y=y,
-                            mode="lines+markers",
-                            name=slabel,
-                            legend=_legend_for_row(row),
-                            text=hover,
-                            hoverinfo="text+y",
-                            line=dict(color=scolor, width=2),
-                            marker=dict(size=5),
-                        ),
-                        row=row,
-                        col=1,
-                        secondary_y=sec_y,
-                    )
+                _add_neuron_smoothed_series(
+                    fig,
+                    row=row,
+                    secondary_y=sec_y,
+                    x=x_iters,
+                    y=y,
+                    name=slabel,
+                    color=scolor,
+                    hover=hover,
+                    legend=_legend_for_row(row),
+                    smooth_window=smooth_window,
+                )
         row += 1
 
     # Row 5: Adam moments (only when Adam) - two y axes
     if has_adam_moments and ci >= 0:
         for sname, slabel, scolor, sec_y in _ADAM_MOMENTS_SIGS:
             y = _signal_at_checkpoints(sigs, sname, ci, x_iters)
-            if not np.all(np.isnan(y)):
-                fig.add_trace(
-                    go.Scatter(
-                        x=x_iters,
-                        y=y,
-                        mode="lines+markers",
-                        name=slabel,
-                        legend=_legend_for_row(row),
-                        text=hover,
-                        hoverinfo="text+y",
-                        line=dict(color=scolor, width=2),
-                        marker=dict(size=5),
-                    ),
-                    row=row,
-                    col=1,
-                    secondary_y=sec_y,
-                )
+            _add_neuron_smoothed_series(
+                fig,
+                row=row,
+                secondary_y=sec_y,
+                x=x_iters,
+                y=y,
+                name=slabel,
+                color=scolor,
+                hover=hover,
+                legend=_legend_for_row(row),
+                smooth_window=smooth_window,
+            )
         row += 1
 
     # Preconditioner inverse norm (Pure / Grafted Shampoo)
     if has_shampoo_h_inv and ci >= 0:
         sname, slabel, scolor = _H_INV_NORM_SIG
         y = _signal_at_checkpoints(sigs, sname, ci, x_iters)
-        if not np.all(np.isnan(y)):
-            fig.add_trace(
-                go.Scatter(
-                    x=x_iters,
-                    y=y,
-                    mode="lines+markers",
-                    name=slabel,
-                    legend=_legend_for_row(row),
-                    text=hover,
-                    hoverinfo="text+y",
-                    line=dict(color=scolor, width=2),
-                    marker=dict(size=5),
-                ),
-                row=row,
-                col=1,
-            )
+        _add_neuron_smoothed_series(
+            fig,
+            row=row,
+            secondary_y=False,
+            x=x_iters,
+            y=y,
+            name=slabel,
+            color=scolor,
+            hover=hover,
+            legend=_legend_for_row(row),
+            smooth_window=smooth_window,
+        )
         row += 1
 
     # Effective LR (Adagrad or grafted Shampoo)
@@ -1202,22 +1347,18 @@ def _build_neuron_detail_figure(
         # Backward compat: old data used effective_lr_mean as 2D matrix
         if np.all(np.isnan(y)) and "effective_lr_mean" in sigs:
             y = _signal_at_checkpoints(sigs, "effective_lr_mean", ci, x_iters)
-        if not np.all(np.isnan(y)):
-            fig.add_trace(
-                go.Scatter(
-                    x=x_iters,
-                    y=y,
-                    mode="lines+markers",
-                    name=slabel,
-                    legend=_legend_for_row(row),
-                    text=hover,
-                    hoverinfo="text+y",
-                    line=dict(color=scolor, width=2),
-                    marker=dict(size=5),
-                ),
-                row=row,
-                col=1,
-            )
+        _add_neuron_smoothed_series(
+            fig,
+            row=row,
+            secondary_y=False,
+            x=x_iters,
+            y=y,
+            name=slabel,
+            color=scolor,
+            hover=hover,
+            legend=_legend_for_row(row),
+            smooth_window=smooth_window,
+        )
 
     # Shared x-axis: tick labels on all subplots (fig.update_layout)
     for i in range(1, n_rows + 1):
@@ -1233,7 +1374,7 @@ def _build_neuron_detail_figure(
 
     # Y-axis titles
     fig.update_yaxes(title_text="Activation", row=1, col=1)
-    fig.update_yaxes(title_text="Value", row=2, col=1)
+    fig.update_yaxes(title_text=r"Mean rel. $\Delta w$", row=2, col=1)
     if has_grad_cos:
         fig.update_yaxes(title_text="Norm", row=3, col=1)
         fig.update_yaxes(title_text="Grad cos. sim.", row=4, col=1)
@@ -1477,6 +1618,58 @@ def _serve_layout() -> html.Div:
                                                     "placement": "bottom",
                                                     "always_visible": False,
                                                 },
+                                            ),
+                                        ],
+                                    ),
+                                ],
+                            ),
+                            html.Div(
+                                className="neuron-smooth-row",
+                                title="Rolling mean window in checkpoints (≥1). "
+                                "Endpoints are omitted until a full window fits; shaded band is 95% CI.",
+                                children=[
+                                    html.Label(
+                                        "Smooth",
+                                        htmlFor="input-neuron-smooth",
+                                        className="neuron-smooth-label",
+                                    ),
+                                    html.Div(
+                                        className="neuron-smooth-control",
+                                        children=[
+                                            html.Div(
+                                                className="neuron-smooth-input-wrap",
+                                                children=[
+                                                    dcc.Input(
+                                                        id="input-neuron-smooth",
+                                                        type="number",
+                                                        min=1,
+                                                        step=1,
+                                                        value=1,
+                                                        debounce=True,
+                                                        className="neuron-smooth-input",
+                                                    ),
+                                                ],
+                                            ),
+                                            html.Div(
+                                                className="neuron-spin-stack",
+                                                children=[
+                                                    html.Button(
+                                                        "▴",
+                                                        id="btn-neuron-smooth-inc",
+                                                        className="neuron-spin-btn",
+                                                        type="button",
+                                                        title="Increase window",
+                                                        n_clicks=0,
+                                                    ),
+                                                    html.Button(
+                                                        "▾",
+                                                        id="btn-neuron-smooth-dec",
+                                                        className="neuron-spin-btn",
+                                                        type="button",
+                                                        title="Decrease window",
+                                                        n_clicks=0,
+                                                    ),
+                                                ],
                                             ),
                                         ],
                                     ),
@@ -1955,6 +2148,40 @@ def _cb_click(click_data: dict | None):
     return val
 
 
+def _parse_neuron_smooth_window(raw: Any) -> int:
+    try:
+        if raw is None or raw == "":
+            return 1
+        w = int(float(raw))
+    except (TypeError, ValueError):
+        return 1
+    return max(1, w)
+
+
+@app.callback(
+    Output("input-neuron-smooth", "value"),
+    Input("btn-neuron-smooth-inc", "n_clicks"),
+    Input("btn-neuron-smooth-dec", "n_clicks"),
+    State("input-neuron-smooth", "value"),
+    prevent_initial_call=True,
+)
+def _cb_neuron_smooth_spin(
+    _n_inc: int | None,
+    _n_dec: int | None,
+    raw: Any,
+):
+    if not callback_context.triggered:
+        return no_update
+    prop = callback_context.triggered[0]["prop_id"]
+    btn_id = prop.split(".")[0] if prop else ""
+    w = _parse_neuron_smooth_window(raw)
+    if btn_id == "btn-neuron-smooth-inc":
+        return w + 1
+    if btn_id == "btn-neuron-smooth-dec":
+        return max(1, w - 1)
+    return no_update
+
+
 @app.callback(
     Output("graph-neuron-detail", "figure"),
     Output("hint-text", "children"),
@@ -1963,6 +2190,7 @@ def _cb_click(click_data: dict | None):
     Input("dd-experiment", "value"),
     Input("dd-model", "value"),
     Input("dd-run", "value"),
+    Input("input-neuron-smooth", "value"),
 )
 def _cb_neuron(
     nid: str | None,
@@ -1970,9 +2198,11 @@ def _cb_neuron(
     eid: str | None,
     mid: str | None,
     rid: str | None,
+    smooth_raw: Any,
 ):
     hint_default = "Click a node in the diagram above to inspect it."
     empty = _empty("", 100)
+    smooth_w = _parse_neuron_smooth_window(smooth_raw)
     if nid is None or eid is None or mid is None or rid is None:
         return empty, hint_default
     if oid is None:
@@ -1983,7 +2213,9 @@ def _cb_neuron(
     if f"act__{safe}" not in nts:
         return empty, hint_default
 
-    fig = _build_neuron_detail_figure(nid, eid, mid, oid, rid=rid)
+    fig = _build_neuron_detail_figure(
+        nid, eid, mid, oid, rid=rid, smooth_window=smooth_w
+    )
     return fig, f"Selected: {nid}"
 
 
