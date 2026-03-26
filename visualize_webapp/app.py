@@ -1128,6 +1128,78 @@ def _add_neuron_smoothed_series(
         )
 
 
+def _add_neuron_dw_over_w_mean_se(
+    fig: go.Figure,
+    *,
+    row: int,
+    secondary_y: bool,
+    x: np.ndarray,
+    y_mean: np.ndarray,
+    y_se: np.ndarray,
+    name: str,
+    color: str,
+    hover: list[str],
+    legend: str,
+) -> None:
+    """Mean dw/w line with ±1.96·SE band (across weights); no rolling smooth over time."""
+    y_m = np.asarray(y_mean, dtype=float)
+    y_s = np.asarray(y_se, dtype=float)
+    if np.all(~np.isfinite(y_m)):
+        return
+    z = 1.96
+    y_lo = y_m - z * y_s
+    y_hi = y_m + z * y_s
+    mask = np.isfinite(y_m) & np.isfinite(y_lo) & np.isfinite(y_hi)
+    if not np.any(mask):
+        return
+    group = f"neuron_ts_r{row}_{name}"
+    group = "".join(c if c.isalnum() else "_" for c in group)
+    trace_kw: dict[str, Any] = dict(row=row, col=1)
+    if secondary_y:
+        trace_kw["secondary_y"] = True
+    fill_col = _hex_to_rgba(color, 0.5)
+    ci_name = f"{name} - 95% SE"
+    for run_i, (a, b) in enumerate(_true_index_runs(mask)):
+        sl = slice(a, b)
+        x_seg = x[sl]
+        y_m_s = y_m[sl]
+        y_hi_s = y_hi[sl]
+        y_lo_s = y_lo[sl]
+        xs_list = list(x_seg)
+        h_seg = hover[a:b]
+        fig.add_trace(
+            go.Scatter(
+                x=xs_list + xs_list[::-1],
+                y=list(y_hi_s) + list(y_lo_s)[::-1],
+                fill="tozerox",
+                fillcolor=fill_col,
+                line=dict(color="rgba(255,255,255,0)"),
+                showlegend=run_i == 0,
+                hoverinfo="skip",
+                legendgroup=group,
+                name=ci_name,
+                legend=legend,
+            ),
+            **trace_kw,
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=x_seg,
+                y=y_m_s,
+                mode="lines+markers",
+                name=name,
+                legend=legend,
+                legendgroup=group,
+                showlegend=run_i == 0,
+                text=h_seg,
+                hoverinfo="text+y",
+                line=dict(color=color, width=2),
+                marker=dict(size=5),
+            ),
+            **trace_kw,
+        )
+
+
 def _build_neuron_detail_figure(
     nid: str,
     eid: str,
@@ -1181,7 +1253,7 @@ def _build_neuron_detail_figure(
     if has_eff_lr:
         specs.append([{}])
 
-    subplot_titles = ["Activation", r"Weight Change (mean $\frac{|\Delta w|}{|w|}$)"]
+    subplot_titles = ["Activation", r"$\frac{|\Delta w|}{|w|} \text{(mean ± 95% SE over weights)}$"]
     if has_grad_cos:
         subplot_titles.extend(["Grad norm", "Cosine similarity"])
     if has_adam_moments:
@@ -1233,36 +1305,35 @@ def _build_neuron_detail_figure(
         )
     row += 1
 
-    # Row 2: Weight Evolution (mean normalized delta w)
+    # Row 2: dw/w mean + SE across weights (ignores neuron smooth-window UI)
     weights_key = f"weights__{safe}"
     if weights_key in nts:
         weights = nts[weights_key]
-        # weights shape: (num_checkpoints, weight_vector_size)
         assert weights.ndim == 2, f"Expected weights shape (num_checkpoints, weight_vector_size), got {weights.shape}"
-        # Compute mean normalized delta: mean_k( |w_k(t) - w_k(t-1)| / |w_k(t-1)| )
-        n_cp = weights.shape[0]
-        mean_norm_delta = np.full(n_cp, np.nan)
-        for t in range(1, n_cp):
-            w_prev = weights[t - 1].astype(np.float64)
-            w_curr = weights[t].astype(np.float64)
-            abs_prev = np.abs(w_prev)
-            # Avoid division by zero: only include weights where |w(t-1)| > eps
-            eps = 1e-12
-            valid_mask = abs_prev > eps
-            if np.any(valid_mask):
-                deltas = np.abs(w_curr[valid_mask] - w_prev[valid_mask]) / abs_prev[valid_mask]
-                mean_norm_delta[t] = float(np.mean(deltas))
-        _add_neuron_smoothed_series(
+        w_arr = weights.astype(np.float64, copy=False)
+        n_w = int(w_arr.shape[1])
+        num = np.abs(np.diff(w_arr, axis=0))
+        denom = np.abs(w_arr[:-1])
+        dw_over_w = np.where(denom > 1e-12, num / denom, 0.0)
+        mean_dw = np.mean(dw_over_w, axis=1)
+        std_dw = np.std(dw_over_w, axis=1, ddof=1)
+        if n_w <= 1:
+            se_dw = np.zeros_like(mean_dw)
+        else:
+            se_dw = std_dw / np.sqrt(n_w)
+        x_w = x_iters[1:]
+        hover_w = hover[1:]
+        _add_neuron_dw_over_w_mean_se(
             fig,
             row=row,
             secondary_y=False,
-            x=x_iters,
-            y=mean_norm_delta,
-            name=r"Mean rel. $\Delta w$",
+            x=x_w,
+            y_mean=mean_dw,
+            y_se=se_dw,
+            name=r"Mean $|\Delta w|/|w|$",
             color=C["accent"],
-            hover=hover,
+            hover=hover_w,
             legend=_legend_for_row(row),
-            smooth_window=smooth_window,
         )
     row += 1
 
@@ -1374,7 +1445,7 @@ def _build_neuron_detail_figure(
 
     # Y-axis titles
     fig.update_yaxes(title_text="Activation", row=1, col=1)
-    fig.update_yaxes(title_text=r"Mean rel. $\Delta w$", row=2, col=1)
+    fig.update_yaxes(title_text=r"$|\Delta w|/|w|$", row=2, col=1)
     if has_grad_cos:
         fig.update_yaxes(title_text="Norm", row=3, col=1)
         fig.update_yaxes(title_text="Grad cos. sim.", row=4, col=1)
@@ -1544,11 +1615,13 @@ def _serve_layout() -> html.Div:
                                 figure=_empty(
                                     "Select experiment, model & run", 380
                                 ),
+                                mathjax=True,
                                 className="graph-half",
                             ),
                             dcc.Graph(
                                 id="graph-acc",
                                 figure=_empty("", 380),
+                                mathjax=True,
                                 className="graph-half",
                             ),
                         ],
@@ -1582,6 +1655,7 @@ def _serve_layout() -> html.Div:
                             "Select an experiment & model to view architecture",
                             200,
                         ),
+                        mathjax=True,
                     ),
                     html.Div(
                         className="slider-container",
@@ -1696,6 +1770,7 @@ def _serve_layout() -> html.Div:
                             dcc.Graph(
                                 id="graph-neuron-detail",
                                 figure=_empty("", 100),
+                                mathjax=True,
                                 className="neuron-graph",
                             ),
                         ],
@@ -1826,7 +1901,7 @@ def _cb_slider(
     use_iter = cp_iters_raw is not None and len(cp_iters_raw) == n
 
     # Choose which checkpoint indices get a visible label (uniformly sampled).
-    MAX_MARKS = 12
+    MAX_MARKS = 40
     if n <= MAX_MARKS:
         labeled_idxs = list(range(n))
     else:
@@ -1843,28 +1918,20 @@ def _cb_slider(
         # Slider value space = actual iteration numbers so the tooltip is meaningful.
         cp_list: list[int] = [int(x) for x in cp_iters_raw]
         slider_max = cp_list[-1]
-        slider_val = cp_list[-1]
+        slider_val = 0 if 0 in set(cp_list) else cp_list[0]
         labeled_set = {cp_list[i] for i in labeled_idxs}
 
-        # All checkpoint positions become marks so step=None can snap to them.
-        # Only the sampled subset gets a visible text label.
-        marks: dict[int, Any] = {}
-        for it in cp_list:
-            if it in labeled_set:
-                marks[it] = {"label": str(it), "style": label_style}
-            else:
-                marks[it] = {"label": "", "style": {"fontSize": "0px"}}
 
-        # Stage-switch ticks: decorate the mark at the matching iteration.
-        for sw in _stage_switch_checkpoint_indices(metrics):
-            if sw < 0 or sw >= n:
-                continue
-            iter_val = cp_list[sw]
-            existing = marks.get(iter_val, {})
-            lab = existing.get("label", "") if isinstance(existing, dict) else ""
-            st = dict(existing.get("style") or {}) if isinstance(existing, dict) else {}
-            label_text = f"{stage_tick} {lab}".strip() if lab else stage_tick
-            marks[iter_val] = {"label": label_text, "style": {**st, **stage_style}}
+        stage_indices = _stage_switch_checkpoint_indices(metrics)
+        stage_iters = {cp_list[sw] for sw in stage_indices if 0 <= sw < n}
+        visible_iters = set(labeled_set) | stage_iters
+
+        marks: dict[int, Any] = {}
+        for it in visible_iters:
+            if it in stage_iters:
+                marks[it] = {"label": stage_tick, "style": stage_style}
+            else:
+                marks[it] = {"label": str(it), "style": label_style}
 
         return slider_max, marks, slider_val, False, None, cp_list
 
@@ -1885,7 +1952,8 @@ def _cb_slider(
                 marks_idx[sw] = {"label": label_text, "style": {**st, **stage_style}}
             else:
                 marks_idx[sw] = {"label": stage_tick, "style": stage_style}
-        return n - 1, marks_idx, n - 1, False, 1, None
+        # Start at checkpoint index 0 when optimizer changes.
+        return n - 1, marks_idx, 0, False, 1, None
 
 
 def _autoplay_step_ms(n_checkpoints: int) -> int:
