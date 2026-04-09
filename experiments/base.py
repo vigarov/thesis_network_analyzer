@@ -8,13 +8,13 @@ from torch.utils.data import DataLoader
 
 
 @dataclass
-class StageSpec:
-    """Describes one training stage."""
+class TrialSpec:
+    """Describes one training trial (one sequenced block in the training schedule)."""
 
     name: str
     train_loader: DataLoader
     eval_loaders: dict[str, DataLoader] = field(default_factory=dict)
-    post_stage_callback: Callable[..., None] | None = field(default=None, repr=False)
+    post_trial_callback: Callable[..., None] | None = field(default=None, repr=False)
     once_only: bool = False
 
 
@@ -22,27 +22,27 @@ class Experiment(abc.ABC):
     """Abstract base class that every experiment must implement."""
 
     def __init__(self) -> None:
-        self._stages_built: bool = False
-        self._trial_variability: str = ""
+        self._trials_built: bool = False
+        self._experiment_variability: str = ""
 
-    def set_trial_var(self, trial_variability: str) -> None:
-        """Set the trial variability string before calling build_stages.
-            Must be called before build_stages(). 
+    def set_experiment_variability(self, experiment_variability: str) -> None:
+        """Set the experiment variability string before calling build_trials.
+            Must be called before build_trials().
         """
-        if self._stages_built:
+        if self._trials_built:
             raise RuntimeError(
-                "set_trial_var() must be called before build_stages(); "
-                "it is invalid after stages have been built."
+                "set_experiment_variability() must be called before build_trials(); "
+                "it is invalid after trials have been built."
             )
-        self._trial_variability = trial_variability
+        self._experiment_variability = experiment_variability
 
     def to_device(self, device: torch.device) -> None:
-        """Pinning data to device to be done before building stages.
+        """Pinning data to device to be done before building trials.
         """
-        if self._stages_built:
+        if self._trials_built:
             raise RuntimeError(
-                "to_device() must be called before build_stages(); "
-                "it is invalid after stages have been built."
+                "to_device() must be called before build_trials(); "
+                "it is invalid after trials have been built."
             )
 
     @abc.abstractmethod
@@ -54,23 +54,23 @@ class Experiment(abc.ABC):
         """Return the experiment-specific config fields that are
         optimizer-independent and must be frozen across reruns."""
 
-    def build_stages(
-        self, batch_size: int, seed: int, *, num_trials: int
-    ) -> "list[StageSpec] | list[list[StageSpec]]":
-        """Construct dataloaders for each training stage.
+    def build_trials(
+        self, batch_size: int, seed: int, *, num_experiment_runs: int
+    ) -> "list[TrialSpec] | list[list[TrialSpec]]":
+        """Construct dataloaders for each training trial.
 
-        Returns either a flat list[StageSpec] (same stages reused each trial)
-        or a list[list[StageSpec]] (one list per trial; len must equal num_trials).
+        Returns either a flat list[TrialSpec] (same trials reused each experiment run)
+        or a list[list[TrialSpec]] (one list per run; len must equal num_experiment_runs).
         """
-        stages = self._build_stages(batch_size, seed, num_trials=num_trials)
-        self._stages_built = True
-        return stages
+        trials = self._build_trials(batch_size, seed, num_experiment_runs=num_experiment_runs)
+        self._trials_built = True
+        return trials
 
     @abc.abstractmethod
-    def _build_stages(
-        self, batch_size: int, seed: int, *, num_trials: int
-    ) -> "list[StageSpec] | list[list[StageSpec]]":
-        """Return an ordered list of StageSpec (flat) or one list per trial (nested)."""
+    def _build_trials(
+        self, batch_size: int, seed: int, *, num_experiment_runs: int
+    ) -> "list[TrialSpec] | list[list[TrialSpec]]":
+        """Return an ordered list of TrialSpec (flat) or one list per experiment run (nested)."""
 
     @abc.abstractmethod
     def evaluation_inputs(self, device: torch.device) -> tuple[torch.Tensor, torch.Tensor]:

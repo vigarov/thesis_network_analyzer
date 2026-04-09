@@ -7,6 +7,8 @@ Description-Content-Type: text/markdown
 Requires-Dist: dash>=4.0.0
 Requires-Dist: matplotlib>=3.10.8
 Requires-Dist: numpy>=2.4.3
+Requires-Dist: scipy>=1.14.0
+Requires-Dist: pandas>=2.2
 Requires-Dist: plotly>=6.6.0
 Requires-Dist: torch>=2.9.1
 Requires-Dist: torch-shampoo
@@ -20,7 +22,7 @@ A framework for analyzing neuron and synapse behavior in neural networks under d
 - **Weight evolution** over training (per-neuron incoming weights for DNNs; per-channel kernel weights for CNNs)
 - **Neuron activations** over training (captured via forward hooks at checkpoints)
 - **Optimizer-tied signals** (gradient magnitude, moment metrics for SGD/Adam/AdaGrad)
-- **Dataset metrics** (loss, validation/test accuracy per stage, digit-subset accuracy)
+- **Dataset metrics** (loss, validation/test accuracy per training trial, digit-subset accuracy)
 
 Results are stored in a structured `results/` hierarchy. A config guard prevents incompatible reruns when outputs already exist (unless `--force` is used).
 
@@ -55,10 +57,10 @@ uv run run-simulation \
     --digitA 1 --digitB 2 \
     --model DNN5Hidden64 \
     --optimizer sgd \
-    --stage-epochs 1 --base-lr 1e-3 --batch-size 1 --seed 3003
+    --trial-epochs 3 --base-lr 1e-3 --batch-size 1 --seed 3003
 ```
 
-### Quick smoke test (1 epoch per stage)
+### Quick smoke test (1 epoch per training trial)
 
 ```bash
 uv run run-simulation \
@@ -66,7 +68,7 @@ uv run run-simulation \
     --digitA 1 --digitB 2 \
     --model DNN5Hidden64 \
     --optimizer sgd \
-    --stage-epochs 1
+    --trial-epochs 1
 ```
 
 Add `--force` to overwrite existing incompatible configs.
@@ -80,7 +82,7 @@ Add `--force` to overwrite existing incompatible configs.
 | `--optimizer` | N/A | Optimizer: `sgd`, `adam`, `adagrad` |
 | `--digitA` | 1 | First digit for continual learning |
 | `--digitB` | 2 | Second digit for continual learning |
-| `--stage-epochs` | 1 | Epochs per training stage |
+| `--trial-epochs` | 3 | Epochs per training trial |
 | `--base-lr` | 1e-3 | Base learning rate |
 | `--batch-size` | 1 | Batch size |
 | `--seed` | 3003 | Random seed |
@@ -119,7 +121,7 @@ The UI lets you:
     "activation": "relu"
   },
   "optimizer": "adam",
-  "stage_epochs": 1,
+  "trial_epochs": 3,
   "base_lr": 0.001,
   "batch_size": 1,
   "seed": 3003,
@@ -142,7 +144,7 @@ For the pretrain experiment:
     "activation": "relu"
   },
   "optimizer": "adagrad",
-  "stage_epochs": 1,
+  "trial_epochs": 3,
   "base_lr": 0.001,
   "batch_size": 1,
   "seed": 3003,

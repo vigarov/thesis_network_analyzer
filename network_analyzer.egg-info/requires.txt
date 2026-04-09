@@ -1,6 +1,8 @@
 dash>=4.0.0
 matplotlib>=3.10.8
 numpy>=2.4.3
+scipy>=1.14.0
+pandas>=2.2
 plotly>=6.6.0
 torch>=2.9.1
 torch-shampoo

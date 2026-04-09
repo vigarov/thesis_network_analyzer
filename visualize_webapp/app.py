@@ -14,7 +14,10 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+import pandas as pd
 import plotly.graph_objects as go
+import torch
+import torch.nn.functional as F
 from plotly.subplots import make_subplots
 from dash import (
     Dash,
@@ -37,6 +40,35 @@ if str(_PROJECT) not in sys.path:
     sys.path.insert(0, str(_PROJECT))
 
 from models.unit_node_id import parse_unit_node_id
+
+
+def _layer_name_short(layer_name: str) -> str:
+    """Compact layer token for neuron labels (e.g. ``hidden.0`` → ``h0``)."""
+    ln = layer_name.strip()
+    if ln.startswith("hidden."):
+        return "h" + ln.split(".", 1)[1]
+    if ln == "head":
+        return "head"
+    if "." in ln:
+        a, b = ln.split(".", 1)
+        return (a[0].lower() if a else "?") + b
+    return ln
+
+
+def _compact_neuron_label(nid: str) -> str:
+    """Display form ``<layer short>:<unit index>`` (e.g. ``h0:16``)."""
+    parsed = parse_unit_node_id(nid)
+    if parsed is not None:
+        return f"{_layer_name_short(parsed['layer_name'])}:{parsed['unit_index']}"
+    parts = str(nid).strip().split("|")
+    if len(parts) == 4:
+        try:
+            idx = int(parts[3])
+        except ValueError:
+            return str(nid)
+        return f"{_layer_name_short(parts[1])}:{idx}"
+    return str(nid)
+
 
 # -- Theme (kept in sync with assets/style.css) ------------------------------
 
@@ -211,6 +243,38 @@ def _nts(e: str, m: str, o: str, *, rid: str) -> dict[str, np.ndarray]:
 def _sigs(e: str, m: str, o: str, *, rid: str) -> dict[str, np.ndarray]:
     return _npz(e, m, o, "signals.npz", rid=rid)
 
+# `pp` stands for post-processing
+
+def _pp_csv(
+    eid: str, mid: str, oid: str, fname: str, *, rid: str
+) -> pd.DataFrame | None:
+    key = ("__pp_csv__", fname, eid, rid, mid, oid)
+    if key in _cache:
+        return _cache[key]
+    path = _optimizer_npz_path(eid, rid, mid, oid, fname)
+    if not path.exists():
+        _cache[key] = None
+        return None
+    df = pd.read_csv(str(path))
+    _cache[key] = df
+    return df
+
+
+def _pp_neuron_digit(
+    e: str, m: str, o: str, *, rid: str
+) -> pd.DataFrame | None:
+    return _pp_csv(e, m, o, "post_processing_neuron_digit.csv", rid=rid)
+
+
+def _pp_dead(e: str, m: str, o: str, *, rid: str) -> pd.DataFrame | None:
+    return _pp_csv(e, m, o, "post_processing_dead.csv", rid=rid)
+
+
+def _pp_train_act(
+    e: str, m: str, o: str, *, rid: str
+) -> dict[str, np.ndarray]:
+    return _npz(e, m, o, "post_processing_train_act.npz", rid=rid)
+
 
 # -- Plotly helpers -----------------------------------------------------------
 
@@ -378,18 +442,22 @@ def _make_dual_y_axes_symmetrical(fig: go.Figure) -> None:
             _set_symmetrical_range(ax_key)
 
 
-def _stage_boundaries_from_metrics(
+def _trial_boundaries_from_metrics(
     metrics: dict[str, np.ndarray],
     x_mode: str,
 ) -> tuple[list[str], list[float], bool] | None:
-    """Extract (stage_names, boundary_x_positions, use_iterations) for plotting.
+    """Extract (trial_names, boundary_x_positions, use_iterations) for plotting.
 
-    Returns None if stage data is missing (backward compat with old runs).
+    Returns None if trial boundary data is missing (backward compat with old runs).
     x_mode: 'checkpoint' or 'iteration'.
     """
-    names = metrics.get("stage_names")
-    cp_idxs = metrics.get("stage_end_checkpoint_idxs")
-    iters = metrics.get("stage_end_iterations")
+    names = metrics.get("trial_names", metrics.get("stage_names"))
+    cp_idxs = metrics.get(
+        "trial_end_checkpoint_idxs", metrics.get("stage_end_checkpoint_idxs")
+    )
+    iters = metrics.get(
+        "trial_end_iterations", metrics.get("stage_end_iterations")
+    )
     if names is None or cp_idxs is None:
         return None
     names = [str(n) for n in names]
@@ -409,33 +477,43 @@ def _stage_boundaries_from_metrics(
     return (names, boundaries, use_iters)
 
 
-def _stage_switch_checkpoint_indices(metrics: dict[str, Any]) -> list[int]:
-    """Checkpoint indices at stage starts, inferred from training_loop tags ``sw_*_entry``."""
+def _trial_switch_checkpoint_indices(metrics: dict[str, Any]) -> list[int]:
+    """Checkpoint indices at trial starts, inferred from ``tsw_*_entry`` tags (legacy: ``sw_*_entry``)."""
     tags = metrics.get("checkpoint_tags")
     if tags is None:
         return []
     out: list[int] = []
     for i, t in enumerate(tags):
         s = str(t)
-        if s.startswith("sw_") and s.endswith("_entry"):
+        if s.endswith("_entry") and (s.startswith("tsw_") or s.startswith("sw_")):
             out.append(i)
     return out
 
 
-def _add_stage_boundaries(
+def _add_trial_boundaries(
     fig: go.Figure,
     metrics: dict[str, np.ndarray],
     x_mode: str,
     subplot_rows: list[tuple[str, int]] | None = None,
+    subplot_xrefs: list[str] | None = None,
 ) -> go.Figure:
-    """Add vertical lines and stage labels to *fig*.
+    """Add vertical lines and training-trial labels to *fig*.
 
     x_mode: 'checkpoint' or 'iteration'.
     subplot_rows: optional list of (x_mode, row_num) for multi-row figures.
       When provided, adds boundaries to each row with its x_mode. row_num is 1-based.
+    subplot_xrefs: optional explicit Plotly x-axis refs (e.g. ``x``, ``x2``, …) for
+      multi-column grids; when set, overrides *subplot_rows* xref mapping.
     """
     rows_config: list[tuple[str, str, str]] = []
-    if subplot_rows:
+    if subplot_xrefs is not None:
+        for xref in subplot_xrefs:
+            if xref == "x":
+                yref = "y domain"
+            else:
+                yref = f"y{xref[1:]} domain"
+            rows_config.append((x_mode, xref, yref))
+    elif subplot_rows:
         for mode, r in subplot_rows:
             xref = "x" if r == 1 else f"x{r}"
             yref = "y domain" if r == 1 else f"y{r} domain"
@@ -448,10 +526,10 @@ def _add_stage_boundaries(
 
     seen_modes: set[str] = set()
     for row_mode, xref, yref in rows_config:
-        sb = _stage_boundaries_from_metrics(metrics, row_mode)
+        sb = _trial_boundaries_from_metrics(metrics, row_mode)
         if sb is None:
             continue
-        stage_names, boundary_xs, use_iters = sb
+        trial_names, boundary_xs, use_iters = sb
         if not boundary_xs:
             continue
 
@@ -470,14 +548,18 @@ def _add_stage_boundaries(
                 )
             )
 
-        # Stage labels: add only once per x_mode to avoid duplicates
+        # Trial labels: add only once per x_mode to avoid duplicates
         if row_mode in seen_modes:
             continue
         seen_modes.add(row_mode)
-        cp_idxs = metrics.get("stage_end_checkpoint_idxs")
-        iters = metrics.get("stage_end_iterations")
-        n = len(stage_names)
-        for i, name in enumerate(stage_names):
+        cp_idxs = metrics.get(
+            "trial_end_checkpoint_idxs", metrics.get("stage_end_checkpoint_idxs")
+        )
+        iters = metrics.get(
+            "trial_end_iterations", metrics.get("stage_end_iterations")
+        )
+        n = len(trial_names)
+        for i, name in enumerate(trial_names):
             if use_iters and iters is not None:
                 start = 0 if i == 0 else float(iters[i - 1]) + 1
                 end = float(iters[i])
@@ -487,7 +569,12 @@ def _add_stage_boundaries(
             else:
                 continue
             mid = (start + end) / 2
-            short = name.replace("stage", "").replace("_", " ").strip()
+            short = (
+                name.replace("stage", "")
+                .replace("trial", "")
+                .replace("_", " ")
+                .strip()
+            )
             annotations.append(
                 dict(
                     x=mid,
@@ -528,6 +615,7 @@ def _primary_loss_lname(metrics: dict[str, np.ndarray]) -> str | None:
         "all_train",
         "all_test",
         "both_test",
+        "eval_both_digits_test",
     ):
         if candidate in lnames:
             return candidate
@@ -630,7 +718,7 @@ def _build_loss(
             title_text="Iteration" if use_iter else "Checkpoint",
         )
     fig.update_yaxes(title_text="Loss")
-    _add_stage_boundaries(fig, first_m, "iteration" if use_iter else "checkpoint")
+    _add_trial_boundaries(fig, first_m, "iteration" if use_iter else "checkpoint")
     _add_show_hide(fig)
     return fig
 
@@ -693,7 +781,7 @@ def _build_acc(
             title_text="Iteration" if use_iter else "Checkpoint",
         )
     fig.update_yaxes(title_text="Accuracy", range=[-0.02, 1.05])
-    _add_stage_boundaries(fig, first_m, "iteration" if use_iter else "checkpoint")
+    _add_trial_boundaries(fig, first_m, "iteration" if use_iter else "checkpoint")
     _add_show_hide(fig)
     return fig
 
@@ -718,6 +806,8 @@ def _build_diagram(
     act_nts: dict[str, np.ndarray] | None = None,
     checkpoint_idx: int | None = None,
     show_hint: bool = False,
+    dead_node_ids: set[str] | None = None,
+    ppd_node_ids: set[str] | None = None,
 ) -> go.Figure:
     fig = go.Figure()
     if not units:
@@ -789,17 +879,29 @@ def _build_diagram(
         ys = [0.5 + (2 * i + 1 - n) / (2 * max_n) for i in range(n)]
         cdata = [u["node_id"] for u in lu]
         is_conv = lu[0]["unit_type"] == "channel"
-        if is_conv:
-            node_color = C["accent"]
-        elif ln == "head":
-            node_color = C["green"]
-        else:
-            node_color = C["blue"]
+        node_colors: list[str] = []
+        for u in lu:
+            nid = u["node_id"]
+            if ppd_node_ids and nid in ppd_node_ids:
+                node_colors.append("#000000")
+            elif dead_node_ids and nid in dead_node_ids:
+                node_colors.append("#808080")
+            elif is_conv:
+                node_colors.append(C["accent"])
+            elif ln == "head":
+                node_colors.append(C["green"])
+            else:
+                node_colors.append(C["blue"])
         sizes = [log_sizes.get(u["node_id"], default_dot_sz) for u in lu]
         if act_vals:
             htxt = [
                 f"{ln} · {u['unit_type']} {u['unit_index']}"
                 f"<br>activation: {act_vals.get(u['node_id'], 0.0):.4f}"
+                + (
+                    " [PPD]"
+                    if ppd_node_ids and u["node_id"] in ppd_node_ids
+                    else (" [DEAD]" if dead_node_ids and u["node_id"] in dead_node_ids else "")
+                )
                 for u in lu
             ]
         else:
@@ -812,7 +914,7 @@ def _build_diagram(
                 mode="markers",
                 marker=dict(
                     size=sizes,
-                    color=node_color,
+                    color=node_colors,
                     line=dict(width=0),
                 ),
                 customdata=cdata,
@@ -1043,6 +1145,7 @@ def _add_neuron_smoothed_series(
     fig: go.Figure,
     *,
     row: int,
+    col: int = 1,
     secondary_y: bool,
     x: np.ndarray,
     y: np.ndarray,
@@ -1059,7 +1162,7 @@ def _add_neuron_smoothed_series(
     group = f"neuron_ts_r{row}_{name}"
     group = "".join(c if c.isalnum() else "_" for c in group)
 
-    trace_kw: dict[str, Any] = dict(row=row, col=1)
+    trace_kw: dict[str, Any] = dict(row=row, col=col)
     if secondary_y:
         trace_kw["secondary_y"] = True
 
@@ -1132,6 +1235,7 @@ def _add_neuron_dw_over_w_mean_se(
     fig: go.Figure,
     *,
     row: int,
+    col: int = 1,
     secondary_y: bool,
     x: np.ndarray,
     y_mean: np.ndarray,
@@ -1140,6 +1244,7 @@ def _add_neuron_dw_over_w_mean_se(
     color: str,
     hover: list[str],
     legend: str,
+    showlegend: bool = True,
 ) -> None:
     """Mean dw/w line with ±1.96·SE band (across weights); no rolling smooth over time."""
     y_m = np.asarray(y_mean, dtype=float)
@@ -1154,7 +1259,7 @@ def _add_neuron_dw_over_w_mean_se(
         return
     group = f"neuron_ts_r{row}_{name}"
     group = "".join(c if c.isalnum() else "_" for c in group)
-    trace_kw: dict[str, Any] = dict(row=row, col=1)
+    trace_kw: dict[str, Any] = dict(row=row, col=col)
     if secondary_y:
         trace_kw["secondary_y"] = True
     fill_col = _hex_to_rgba(color, 0.5)
@@ -1174,7 +1279,7 @@ def _add_neuron_dw_over_w_mean_se(
                 fill="tozerox",
                 fillcolor=fill_col,
                 line=dict(color="rgba(255,255,255,0)"),
-                showlegend=run_i == 0,
+                showlegend=showlegend and run_i == 0,
                 hoverinfo="skip",
                 legendgroup=group,
                 name=ci_name,
@@ -1190,7 +1295,7 @@ def _add_neuron_dw_over_w_mean_se(
                 name=name,
                 legend=legend,
                 legendgroup=group,
-                showlegend=run_i == 0,
+                showlegend=showlegend and run_i == 0,
                 text=h_seg,
                 hoverinfo="text+y",
                 line=dict(color=color, width=2),
@@ -1198,6 +1303,93 @@ def _add_neuron_dw_over_w_mean_se(
             ),
             **trace_kw,
         )
+
+
+# Eval batch for MNIST-style experiments: 10 digits x 5 samples (see experiments/mnist/base.py).
+_NETWORK_N_DIGITS = 10
+_NETWORK_SAMPLES_PER_DIGIT = 5
+_NETWORK_EXPECTED_BATCH = _NETWORK_N_DIGITS * _NETWORK_SAMPLES_PER_DIGIT
+_NEURON_ACT_GRID_ROWS = 5
+_NEURON_ACT_GRID_COLS = 2
+
+
+def _activation_sample_matrix(
+    nts: dict[str, np.ndarray], nid: str
+) -> np.ndarray | None:
+    """Return shape (n_checkpoints, n_samples) float array, or None."""
+    safe = nid.replace(":", "__")
+    key = f"act__{safe}"
+    if key not in nts:
+        return None
+    act_arr = nts[key]
+    if act_arr.dtype == object:
+        raise ValueError("act_arr.dtype == object")
+        # rows: list[np.ndarray] = []
+        # for t in range(len(act_arr)):
+        #     row = np.asarray(act_arr[t], dtype=np.float64).ravel()
+        #     rows.append(row)
+        # if not rows:
+        #     return None
+        # n_s = rows[0].shape[0]
+        # if any(r.shape[0] != n_s for r in rows):
+        #     return None
+        # return np.stack(rows, axis=0)
+    if act_arr.ndim < 2:
+        return None
+    return np.asarray(act_arr, dtype=np.float64)
+
+
+def _head_layer_from_nts(nts: dict[str, np.ndarray]) -> str | None:
+    """Return the head (last) layer name from the unit_node_ids in nts."""
+    if "unit_node_ids" not in nts:
+        return None
+    layer_order: list[str] = []
+    for nid in nts["unit_node_ids"]:
+        parsed = parse_unit_node_id(str(nid))
+        if parsed is None:
+            continue
+        ln = parsed["layer_name"]
+        if ln not in layer_order:
+            layer_order.append(ln)
+    return layer_order[-1] if layer_order else None
+
+
+def _activation_sample_matrix_post_nl(
+    nts: dict[str, np.ndarray],
+    nid: str,
+) -> np.ndarray | None:
+    """Like _activation_sample_matrix but with post-nonlinearity transform applied.
+
+    Hidden layers: ReLU.  Head layer: softmax across all head units per sample.
+    """
+    A = _activation_sample_matrix(nts, nid)
+    if A is None:
+        return None
+    parsed = parse_unit_node_id(nid)
+    if parsed is None:
+        return F.relu(torch.from_numpy(A)).numpy()
+
+    head_layer = _head_layer_from_nts(nts)
+    if parsed["layer_name"] != head_layer:
+        return F.relu(torch.from_numpy(A)).numpy()
+
+    head_nids: list[str] = []
+    for uid in nts["unit_node_ids"]:
+        p = parse_unit_node_id(str(uid))
+        if p and p["layer_name"] == head_layer:
+            head_nids.append(str(uid))
+
+    head_acts: list[np.ndarray] = []
+    for hn in head_nids:
+        ha = _activation_sample_matrix(nts, hn)
+        if ha is None:
+            return F.relu(torch.from_numpy(A)).numpy()
+        head_acts.append(ha)
+
+    stacked = np.stack(head_acts, axis=-1)  # (n_cp, n_samples, n_head)
+    sm = torch.softmax(torch.from_numpy(stacked), dim=-1).numpy()
+    idx = head_nids.index(nid)
+    return sm[:, :, idx]
 
 
 def _build_neuron_detail_figure(
@@ -1208,10 +1400,10 @@ def _build_neuron_detail_figure(
     *,
     rid: str,
     smooth_window: int = 1,
+    post_nonlinearity: bool = False,
 ) -> go.Figure:
-    """Build one combined figure with shared x-axis: Activation, Weight, Grad norm,
-    Cosine similarity (dual y for Adam), Adam moments (Adam only),
-    Shampoo preconditioner norm (Shampoo only), Effective LR (Adagrad / grafted Shampoo).
+    """Build one combined figure: 10-digit activation grid (mean +/- 95% SE over K=5),
+    then shared x-axis rows for dw/w, grad norm, cosine sim, Adam / Shampoo / LR signals.
     """
     nts = _nts(eid, mid, oid, rid=rid)
     sigs = _sigs(eid, mid, oid, rid=rid)
@@ -1228,32 +1420,55 @@ def _build_neuron_detail_figure(
     uid_list = [str(n) for n in sigs.get("unit_node_ids", [])] if has_sigs else []
     ci = uid_list.index(nid) if nid in uid_list else -1
 
-    # Row layout: 1=Activation, 2=Weight, 3=Grad norm, 4=Cosine sim (when has_sigs),
-    # 5=Adam moments (Adam only), then Shampoo precond. norm, then Effective LR
+    safe = nid.replace(":", "__")
+    if post_nonlinearity:
+        A = _activation_sample_matrix_post_nl(nts, nid)
+    else:
+        A = _activation_sample_matrix(nts, nid)
+    if A is None or A.shape[1] != _NETWORK_EXPECTED_BATCH:
+        return _empty(
+            f"Neuron detail needs {_NETWORK_EXPECTED_BATCH} eval samples "
+            f"(10 digits x 5); this run has "
+            f"{0 if A is None else A.shape[1]}.",
+            200,
+        )
+
     has_adam_moments = has_sigs and otype == "adam"
     has_shampoo_h_inv = has_sigs and otype in ("pure_shampoo", "grafted_shampoo")
     has_eff_lr = has_sigs and otype in ("adagrad", "grafted_shampoo")
     has_grad_cos = has_sigs  # grad norm + cosine sim rows
 
-    n_rows = (
-        2
+    n_metric_rows = (
+        1
         + (2 if has_grad_cos else 0)
         + (1 if has_adam_moments else 0)
         + (1 if has_shampoo_h_inv else 0)
         + (1 if has_eff_lr else 0)
     )
-    specs: list[list[dict]] = [[{}], [{}]]
-    if has_grad_cos:
-        specs.append([{}])
-        specs.append([{"secondary_y": True}] if otype == "adam" else [{}])
-    if has_adam_moments:
-        specs.append([{"secondary_y": True}])
-    if has_shampoo_h_inv:
-        specs.append([{}])
-    if has_eff_lr:
-        specs.append([{}])
+    total_fig_rows = _NEURON_ACT_GRID_ROWS + n_metric_rows
 
-    subplot_titles = ["Activation", r"$\frac{|\Delta w|}{|w|} \text{(mean ± 95% SE over weights)}$"]
+    specs: list[list[dict | None]] = [
+        [{}, {}] for _ in range(_NEURON_ACT_GRID_ROWS)
+    ]
+    specs.append([{"colspan": 2}, None])
+    if has_grad_cos:
+        specs.append([{"colspan": 2}, None])
+        specs.append(
+            [{"secondary_y": True, "colspan": 2}, None]
+            if otype == "adam"
+            else [{"colspan": 2}, None]
+        )
+    if has_adam_moments:
+        specs.append([{"secondary_y": True, "colspan": 2}, None])
+    if has_shampoo_h_inv:
+        specs.append([{"colspan": 2}, None])
+    if has_eff_lr:
+        specs.append([{"colspan": 2}, None])
+
+    subplot_titles: list[str | None] = [f"Digit {d}" for d in range(_NETWORK_N_DIGITS)]
+    subplot_titles.append(
+        r"$\frac{|\Delta w|}{|w|} \text{(mean ± 95% SE over weights)}$"
+    )
     if has_grad_cos:
         subplot_titles.extend(["Grad norm", "Cosine similarity"])
     if has_adam_moments:
@@ -1263,53 +1478,68 @@ def _build_neuron_detail_figure(
     if has_eff_lr:
         subplot_titles.append("Effective LR")
 
+    row_heights: list[float] | None = [0.11] * _NEURON_ACT_GRID_ROWS + [
+        0.22
+    ] * n_metric_rows
+
     fig = make_subplots(
-        rows=n_rows,
-        cols=1,
+        rows=total_fig_rows,
+        cols=2,
         shared_xaxes=True,
+        shared_yaxes=False,
         specs=specs,
-        vertical_spacing=0.06,
-        subplot_titles=subplot_titles,
+        vertical_spacing=0.05,
+        horizontal_spacing=0.06,
+        subplot_titles=tuple(subplot_titles),
+        row_heights=row_heights,
     )
 
     hover = [f"iter {int(x)} · {t}" for x, t in zip(x_iters, tags)]
     tv, tt = _thin_ticks(list(x_iters), [str(int(x)) for x in x_iters])
-    row = 1
 
-    # Assign traces to per-subplot legends (legend for row 1, legend2 for row 2, etc.)
-    def _legend_for_row(r: int) -> str:
-        return "legend" if r == 1 else f"legend{r}"
-
-    # Row 1: Activation
-    safe = nid.replace(":", "__")
-    if f"act__{safe}" in nts:
-        act_arr = nts[f"act__{safe}"]
-        # Compute mean over sample/value dimensions for display
-        if act_arr.dtype == object:
-            act_1d = np.array([float(np.mean(act_arr[t])) for t in range(len(act_arr))])
-        elif act_arr.ndim > 1:
-            act_1d = np.mean(act_arr, axis=tuple(range(1, act_arr.ndim)))
+    k_samp = _NETWORK_SAMPLES_PER_DIGIT
+    for d in range(_NETWORK_N_DIGITS):
+        block = A[:, d * k_samp : (d + 1) * k_samp].astype(np.float64, copy=False)
+        y_mean = np.mean(block, axis=1)
+        if k_samp <= 1:
+            y_se = np.zeros_like(y_mean)
         else:
-            act_1d = act_arr
-        _add_neuron_smoothed_series(
+            y_se = np.std(block, axis=1, ddof=1) / np.sqrt(float(k_samp))
+        r_1b = d // _NEURON_ACT_GRID_COLS + 1
+        c_1b = d % _NEURON_ACT_GRID_COLS + 1
+        _add_neuron_dw_over_w_mean_se(
             fig,
-            row=row,
+            row=r_1b,
+            col=c_1b,
             secondary_y=False,
             x=x_iters,
-            y=act_1d,
-            name="Activation",
+            y_mean=y_mean,
+            y_se=y_se,
+            name="Mean activation",
             color=C["blue"],
             hover=hover,
-            legend=_legend_for_row(row),
-            smooth_window=smooth_window,
+            legend="legend" if d == 0 else f"legend{d + 1}",
+            showlegend=(d == 0),
         )
-    row += 1
 
-    # Row 2: dw/w mean + SE across weights (ignores neuron smooth-window UI)
+    def _legend_for_subplot(si: int) -> str:
+        return "legend" if si == 1 else f"legend{si}"
+
+    leg_si = _NETWORK_N_DIGITS + 1
+    r_m = _NEURON_ACT_GRID_ROWS + 1
+    r_dw = r_m
+    r_grad: int | None = None
+    r_cos: int | None = None
+    r_adam: int | None = None
+    r_sh: int | None = None
+    r_lr: int | None = None
+
     weights_key = f"weights__{safe}"
     if weights_key in nts:
         weights = nts[weights_key]
-        assert weights.ndim == 2, f"Expected weights shape (num_checkpoints, weight_vector_size), got {weights.shape}"
+        assert weights.ndim == 2, (
+            f"Expected weights shape (num_checkpoints, weight_vector_size), got {weights.shape}"
+        )
         w_arr = weights.astype(np.float64, copy=False)
         n_w = int(w_arr.shape[1])
         num = np.abs(np.diff(w_arr, axis=0))
@@ -1325,7 +1555,8 @@ def _build_neuron_detail_figure(
         hover_w = hover[1:]
         _add_neuron_dw_over_w_mean_se(
             fig,
-            row=row,
+            row=r_dw,
+            col=1,
             secondary_y=False,
             x=x_w,
             y_mean=mean_dw,
@@ -1333,146 +1564,174 @@ def _build_neuron_detail_figure(
             name=r"Mean $|\Delta w|/|w|$",
             color=C["accent"],
             hover=hover_w,
-            legend=_legend_for_row(row),
+            legend=_legend_for_subplot(leg_si),
         )
-    row += 1
+    r_m += 1
+    leg_si += 1
 
-    # Row 3: Grad norm (only when has_grad_cos)
     if has_grad_cos:
+        r_grad = int(r_m)
         if ci >= 0:
             sname, slabel, scolor = _GRAD_NORM_SIG
             y = _signal_at_checkpoints(sigs, sname, ci, x_iters)
             _add_neuron_smoothed_series(
                 fig,
-                row=row,
+                row=r_grad,
+                col=1,
                 secondary_y=False,
                 x=x_iters,
                 y=y,
                 name=slabel,
                 color=scolor,
                 hover=hover,
-                legend=_legend_for_row(row),
+                legend=_legend_for_subplot(leg_si),
                 smooth_window=smooth_window,
             )
-        row += 1
+        r_m += 1
+        leg_si += 1
 
-    # Row 4: Cosine similarity (grad + 1st moment for Adam with secondary y)
-    if has_grad_cos:
+        r_cos = int(r_m)
         if ci >= 0:
             for sname, slabel, scolor, sec_y in _COSINE_SIM_SIGS.get(otype, []):
                 y = _signal_at_checkpoints(sigs, sname, ci, x_iters)
                 _add_neuron_smoothed_series(
                     fig,
-                    row=row,
+                    row=r_cos,
+                    col=1,
                     secondary_y=sec_y,
                     x=x_iters,
                     y=y,
                     name=slabel,
                     color=scolor,
                     hover=hover,
-                    legend=_legend_for_row(row),
+                    legend=_legend_for_subplot(leg_si),
                     smooth_window=smooth_window,
                 )
-        row += 1
+        r_m += 1
+        leg_si += 1
 
-    # Row 5: Adam moments (only when Adam) - two y axes
     if has_adam_moments and ci >= 0:
+        r_adam = int(r_m)
         for sname, slabel, scolor, sec_y in _ADAM_MOMENTS_SIGS:
             y = _signal_at_checkpoints(sigs, sname, ci, x_iters)
             _add_neuron_smoothed_series(
                 fig,
-                row=row,
+                row=r_adam,
+                col=1,
                 secondary_y=sec_y,
                 x=x_iters,
                 y=y,
                 name=slabel,
                 color=scolor,
                 hover=hover,
-                legend=_legend_for_row(row),
+                legend=_legend_for_subplot(leg_si),
                 smooth_window=smooth_window,
             )
-        row += 1
+        r_m += 1
+        leg_si += 1
 
-    # Preconditioner inverse norm (Pure / Grafted Shampoo)
     if has_shampoo_h_inv and ci >= 0:
+        r_sh = int(r_m)
         sname, slabel, scolor = _H_INV_NORM_SIG
         y = _signal_at_checkpoints(sigs, sname, ci, x_iters)
         _add_neuron_smoothed_series(
             fig,
-            row=row,
+            row=r_sh,
+            col=1,
             secondary_y=False,
             x=x_iters,
             y=y,
             name=slabel,
             color=scolor,
             hover=hover,
-            legend=_legend_for_row(row),
+            legend=_legend_for_subplot(leg_si),
             smooth_window=smooth_window,
         )
-        row += 1
+        r_m += 1
+        leg_si += 1
 
-    # Effective LR (Adagrad or grafted Shampoo)
     if has_eff_lr and ci >= 0:
+        r_lr = int(r_m)
         sname, slabel, scolor = _ADAGRAD_LR_SIG
         y = _signal_at_checkpoints(sigs, sname, ci, x_iters, unit_safe=safe)
-        # Backward compat: old data used effective_lr_mean as 2D matrix
         if np.all(np.isnan(y)) and "effective_lr_mean" in sigs:
             y = _signal_at_checkpoints(sigs, "effective_lr_mean", ci, x_iters)
         _add_neuron_smoothed_series(
             fig,
-            row=row,
+            row=r_lr,
+            col=1,
             secondary_y=False,
             x=x_iters,
             y=y,
             name=slabel,
             color=scolor,
             hover=hover,
-            legend=_legend_for_row(row),
+            legend=_legend_for_subplot(leg_si),
             smooth_window=smooth_window,
         )
 
-    # Shared x-axis: tick labels on all subplots (fig.update_layout)
-    for i in range(1, n_rows + 1):
+    # X axes: ticks on all; "Iteration" title on bottom row only
+    for r in range(1, _NEURON_ACT_GRID_ROWS + 1):
+        for c in range(1, _NEURON_ACT_GRID_COLS + 1):
+            fig.update_xaxes(
+                tickvals=tv,
+                ticktext=tt,
+                tickangle=-40,
+                title_text="",
+                showticklabels=True,
+                row=r,
+                col=c,
+            )
+    for r in range(_NEURON_ACT_GRID_ROWS + 1, total_fig_rows + 1):
         fig.update_xaxes(
             tickvals=tv,
             ticktext=tt,
             tickangle=-40,
-            title_text="Iteration" if i == n_rows else "",
+            title_text="Iteration" if r == total_fig_rows else "",
             showticklabels=True,
-            row=i,
+            row=r,
             col=1,
         )
 
-    # Y-axis titles
-    fig.update_yaxes(title_text="Activation", row=1, col=1)
-    fig.update_yaxes(title_text=r"$|\Delta w|/|w|$", row=2, col=1)
-    if has_grad_cos:
-        fig.update_yaxes(title_text="Norm", row=3, col=1)
-        fig.update_yaxes(title_text="Grad cos. sim.", row=4, col=1)
-        if otype == "adam":
-            fig.update_yaxes(title_text="1st moment cos. sim.", row=4, col=1, secondary_y=True)
-    adam_row = 3 + (2 if has_grad_cos else 0)
-    if has_adam_moments:
-        fig.update_yaxes(title_text="1st moment norm", row=adam_row, col=1)
-        fig.update_yaxes(title_text="2nd moment norm", row=adam_row, col=1, secondary_y=True)
-    if has_shampoo_h_inv:
-        h_inv_row = n_rows - (1 if has_eff_lr else 0)
-        fig.update_yaxes(title_text="Precond. inv. norm", row=h_inv_row, col=1)
-    if has_eff_lr:
-        fig.update_yaxes(title_text="Effective LR", row=n_rows, col=1)
+    for r in range(1, _NEURON_ACT_GRID_ROWS + 1):
+        for c in range(1, _NEURON_ACT_GRID_COLS + 1):
+            fig.update_yaxes(title_text="Mean", row=r, col=c)
 
-    height = 280 * n_rows
+    fig.update_yaxes(title_text=r"$|\Delta w|/|w|$", row=r_dw, col=1)
+    if r_grad is not None:
+        fig.update_yaxes(title_text="Norm", row=r_grad, col=1)
+    if r_cos is not None:
+        fig.update_yaxes(title_text="Grad cos. sim.", row=r_cos, col=1)
+        if otype == "adam":
+            fig.update_yaxes(
+                title_text="1st moment cos. sim.",
+                row=r_cos,
+                col=1,
+                secondary_y=True,
+            )
+    if has_adam_moments and r_adam is not None:
+        fig.update_yaxes(title_text="1st moment norm", row=r_adam, col=1)
+        fig.update_yaxes(
+            title_text="2nd moment norm", row=r_adam, col=1, secondary_y=True
+        )
+    if has_shampoo_h_inv and r_sh is not None:
+        fig.update_yaxes(title_text="Precond. inv. norm", row=r_sh, col=1)
+    if has_eff_lr and r_lr is not None:
+        fig.update_yaxes(title_text="Effective LR", row=r_lr, col=1)
+
+    height = int(_NEURON_ACT_GRID_ROWS * 150 + n_metric_rows * 280)
     _style(fig, height=height)
-    _add_stage_boundaries(
+
+    trial_boundary_xrefs: list[str] = ["x"] + [f"x{i}" for i in range(2, _NETWORK_N_DIGITS + 1)]
+    for j in range(_NETWORK_N_DIGITS + 1, _NETWORK_N_DIGITS + 1 + n_metric_rows):
+        trial_boundary_xrefs.append(f"x{j}")
+    _add_trial_boundaries(
         fig,
         metrics,
         "iteration",
-        subplot_rows=[("iteration", r) for r in range(1, n_rows + 1)],
+        subplot_xrefs=trial_boundary_xrefs,
     )
 
-    # Position one legend per subplot at the level of the relevant row.
-    # With secondary_y (e.g. Adam cosine row), yaxis4 and yaxis5 share a domain,
-    # so we map row index to unique subplot domains.
     _legend_style: dict[str, Any] = dict(
         bgcolor="rgba(0,0,0,0.3)",
         bordercolor=C["border"],
@@ -1485,7 +1744,7 @@ def _build_neuron_detail_figure(
         visible=True,
     )
     seen_domains: list[tuple[float, float]] = []
-    for i in range(1, 20):
+    for i in range(1, 64):
         yax_key = "yaxis" if i == 1 else f"yaxis{i}"
         try:
             yax = getattr(fig.layout, yax_key, None)
@@ -1498,11 +1757,14 @@ def _build_neuron_detail_figure(
             dom_tup = (float(domain[0]), float(domain[1]))
             if dom_tup not in seen_domains:
                 seen_domains.append(dom_tup)
+    n_leg_panels = _NETWORK_N_DIGITS + n_metric_rows
     legend_updates: dict[str, Any] = {}
-    for r in range(1, n_rows + 1):
-        leg_key = "legend" if r == 1 else f"legend{r}"
-        if r <= len(seen_domains):
-            y_center = (seen_domains[r - 1][0] + seen_domains[r - 1][1]) / 2
+    for si in range(1, n_leg_panels + 1):
+        if si <= _NETWORK_N_DIGITS and si > 1:
+            continue
+        leg_key = "legend" if si == 1 else f"legend{si}"
+        if si <= len(seen_domains):
+            y_center = (seen_domains[si - 1][0] + seen_domains[si - 1][1]) / 2
             legend_updates[leg_key] = dict(
                 **_legend_style,
                 y=y_center,
@@ -1513,6 +1775,1024 @@ def _build_neuron_detail_figure(
 
     _make_dual_y_axes_symmetrical(fig)
     _add_show_hide(fig)
+    return fig
+
+
+# -- Network analysis (eval-batch activation scatter) -------------------------
+
+# Plotly sequential colorscales: one per eval-sample index k in {0..4}.
+# Plotly built-in names (``speed`` is lowercase in plotly.express.colors.sequential).
+_NETWORK_EVAL_K_COLORSCALES: tuple[str, ...] = (
+    "Teal",
+    "speed",
+    "Purp",
+    "Brwnyl",
+    "Greys_r",
+)
+
+# Solid line colors for eval-sample index k (matches K order above; see MNIST eval_ds: 5 per digit).
+_NETWORK_EVAL_K_LINE_COLORS: tuple[str, ...] = (
+    "#14b8a6",
+    "#2563eb",
+    "#7c3aed",
+    "#a16207",
+    "#57534e",
+)
+
+
+def _network_linear_regression_line(
+    xs: np.ndarray, ys: np.ndarray
+) -> tuple[np.ndarray, np.ndarray] | None:
+    """Return ``(x_line, y_line)`` for a least-squares fit, or None if ill-defined."""
+    xs = np.asarray(xs, dtype=np.float64).ravel()
+    ys = np.asarray(ys, dtype=np.float64).ravel()
+    m = np.isfinite(xs) & np.isfinite(ys)
+    if m.sum() < 2:
+        return None
+    xs = xs[m]
+    ys = ys[m]
+    coef = np.polyfit(xs, ys, 1)
+    slope, icept = float(coef[0]), float(coef[1])
+    x0, x1 = float(xs.min()), float(xs.max())
+    if x0 == x1:
+        x0 -= 1e-6
+        x1 += 1e-6
+    xl = np.array([x0, x1], dtype=np.float64)
+    yl = slope * xl + icept
+    return xl, yl
+
+
+def _build_network_activation_figure(
+    nid: str,
+    eid: str,
+    mid: str,
+    oid: str,
+    *,
+    rid: str,
+    k_visible: list[bool] | tuple[bool, ...] | None = None,
+    post_nonlinearity: bool = False,
+) -> go.Figure:
+    """10 subplots (2x5): per digit, scatter x=prev activation, y=consecutive delta-act.
+
+    Eval batch layout matches MNIST base: 50 samples, index ``5*d + k`` for digit ``d``, sample ``k``.
+    """
+    kv: list[bool]
+    if k_visible is None or len(k_visible) != _NETWORK_SAMPLES_PER_DIGIT:
+        kv = [True] * _NETWORK_SAMPLES_PER_DIGIT
+    else:
+        kv = [bool(x) for x in k_visible]
+
+    nts = _nts(eid, mid, oid, rid=rid)
+    metrics = _metrics(eid, mid, oid, rid=rid)
+    if post_nonlinearity:
+        A = _activation_sample_matrix_post_nl(nts, nid)
+    else:
+        A = _activation_sample_matrix(nts, nid)
+    if A is None:
+        return _empty("No activation timeseries for this unit.", h=400)
+
+    n_cp, n_samp = A.shape
+    if n_cp < 2:
+        return _empty("Need at least 2 checkpoints for consecutive Δ.", h=400)
+    if n_samp != _NETWORK_EXPECTED_BATCH:
+        return _empty(
+            f"Network view expects { _NETWORK_EXPECTED_BATCH } eval samples "
+            f"(10 digits x 5); this run has {n_samp}.",
+            h=400,
+        )
+
+    tags = [str(t) for t in nts.get("checkpoint_tags", [])]
+    cp_iters = metrics.get("checkpoint_iterations")
+    if cp_iters is not None and len(cp_iters) == len(tags):
+        it_list = [int(x) for x in cp_iters]
+    else:
+        it_list = list(range(len(tags)))
+
+    subplot_titles = [f"Digit {d}" for d in range(_NETWORK_N_DIGITS)]
+    fig = make_subplots(
+        rows=5,
+        cols=2,
+        subplot_titles=subplot_titles,
+        vertical_spacing=0.07,
+        horizontal_spacing=0.14,
+    )
+
+    cmin = 1
+    cmax = max(1, n_cp - 1)
+
+    # Per-digit bounds for symmetric axes around 0 (visible points only): x from prev act, y from Δact.
+    axis_bound_x: list[float] = []
+    axis_bound_y: list[float] = []
+
+    for d in range(_NETWORK_N_DIGITS):
+        row = d // 2 + 1
+        col = d % 2 + 1
+        xs_digit: list[float] = []
+        ys_digit: list[float] = []
+        for k in range(_NETWORK_SAMPLES_PER_DIGIT):
+            if not kv[k]:
+                continue
+            i = _NETWORK_SAMPLES_PER_DIGIT * d + k
+            for t in range(1, n_cp):
+                prev_a = float(A[t - 1, i])
+                cur_a = float(A[t, i])
+                xs_digit.append(prev_a)
+                ys_digit.append(cur_a - prev_a)
+
+        if xs_digit:
+            arr_x = np.asarray(xs_digit, dtype=np.float64)
+            arr_y = np.asarray(ys_digit, dtype=np.float64)
+            bx = float(np.nanmax(np.abs(arr_x)))
+            by = float(np.nanmax(np.abs(arr_y)))
+            if not np.isfinite(bx) or bx <= 0:
+                bx = 1e-6
+            if not np.isfinite(by) or by <= 0:
+                by = 1e-6
+            axis_bound_x.append(bx * 1.05)
+            axis_bound_y.append(by * 1.05)
+        else:
+            axis_bound_x.append(1.0)
+            axis_bound_y.append(1.0)
+
+        for k in range(_NETWORK_SAMPLES_PER_DIGIT):
+            i = _NETWORK_SAMPLES_PER_DIGIT * d + k
+            xs: list[float] = []
+            ys: list[float] = []
+            colors: list[float] = []
+            htext: list[str] = []
+            for t in range(1, n_cp):
+                prev_a = float(A[t - 1, i])
+                cur_a = float(A[t, i])
+                xs.append(prev_a)
+                ys.append(cur_a - prev_a)
+                colors.append(float(t))
+                tag = tags[t] if t < len(tags) else "?"
+                it = it_list[t] if t < len(it_list) else t
+                htext.append(
+                    f"digit {d} · K={k + 1} · step t={t}<br>"
+                    f"iter {it} · {tag}<br>"
+                    f"prev act: {prev_a:.5f}<br>"
+                    f"Δact: {cur_a - prev_a:.5f}"
+                )
+
+            cs = _NETWORK_EVAL_K_COLORSCALES[k]
+            show_leg = d == 0
+            trace_name = f"K={k + 1} ({cs})"
+            first_trace = d == 0 and k == 0
+            mk: dict[str, Any] = dict(
+                size=7,
+                opacity=0.6,
+                color=colors,
+                colorscale=cs,
+                cmin=cmin,
+                cmax=cmax,
+            )
+            if first_trace:
+                mk["showscale"] = True
+                mk["colorbar"] = dict(
+                    title=dict(text="Checkpoint step t", font=dict(size=10)),
+                    len=0.28,
+                    thickness=12,
+                    x=1.02,
+                    xanchor="left",
+                    y=1.0,
+                    yanchor="top",
+                )
+            else:
+                mk["showscale"] = False
+
+            fig.add_trace(
+                go.Scatter(
+                    x=xs,
+                    y=ys,
+                    mode="markers",
+                    marker=mk,
+                    text=htext,
+                    hoverinfo="text",
+                    name=trace_name,
+                    legendgroup=f"k{k}",
+                    showlegend=show_leg,
+                    visible=kv[k],
+                ),
+                row=row,
+                col=col,
+            )
+
+        # Linear regression on visible points only for this digit.
+        xs_reg = np.asarray(xs_digit, dtype=np.float64)
+        ys_reg = np.asarray(ys_digit, dtype=np.float64)
+        reg = _network_linear_regression_line(xs_reg, ys_reg)
+        if reg is not None:
+            xl, yl = reg
+            fig.add_trace(
+                go.Scatter(
+                    x=xl,
+                    y=yl,
+                    mode="lines",
+                    line=dict(color="rgba(28,25,23,0.85)", width=2, dash="dash"),
+                    name="OLS fit",
+                    legendgroup="reg",
+                    showlegend=False,
+                    hoverinfo="skip",
+                ),
+                row=row,
+                col=col,
+            )
+
+    x_title = r"$\text{Activation at } t-1$"
+    y_title = r"$\Delta \text{activation}$"
+    for i_d, d in enumerate(range(_NETWORK_N_DIGITS)):
+        ri = d // 2 + 1
+        ci = d % 2 + 1
+        bndx = axis_bound_x[i_d]
+        bndy = axis_bound_y[i_d]
+        fig.update_xaxes(
+            title_text=x_title,
+            range=[-bndx, bndx],
+            zeroline=True,
+            zerolinewidth=1,
+            zerolinecolor=C["border"],
+            row=ri,
+            col=ci,
+        )
+        fig.update_yaxes(
+            title_text=y_title,
+            range=[-bndy, bndy],
+            zeroline=True,
+            zerolinewidth=1,
+            zerolinecolor=C["border"],
+            row=ri,
+            col=ci,
+        )
+
+    total_h = 260 * 5
+    _style(
+        fig,
+        height=total_h,
+        margin=dict(l=72, r=120, t=88, b=48),
+        title=dict(
+            text=f"Eval-batch activation deltas — {nid}",
+            font=dict(size=14),
+        ),
+        legend=dict(
+            x=0.01,
+            y=1.0,
+            xanchor="left",
+            yanchor="top",
+            bgcolor="rgba(255,255,255,0.92)",
+            bordercolor=C["border"],
+            borderwidth=1,
+            font=dict(size=10),
+            itemclick=False,
+            itemdoubleclick=False,
+        ),
+    )
+    return fig
+
+
+# -- Network tab builder functions --------------------------------------------
+
+_DIGIT_COLORS = (
+    "#e6194B", "#3cb44b", "#ffe119", "#4363d8", "#f58231",
+    "#911eb4", "#42d4f4", "#f032e6", "#bfef45", "#469990",
+)
+
+_LAYER_COMBINED_COLORS = (
+    "#636efa",
+    "#ef553b",
+    "#00cc96",
+    "#ab63fa",
+    "#ffa15a",
+    "#19d3f3",
+    "#ff6692",
+    "#b6e880",
+    "#ff97ff",
+    "#fecb52",
+)
+
+
+def _is_dead_column_to_bool(s: pd.Series) -> np.ndarray:
+    """Parse ``is_dead`` from ``post_processing_dead.csv`` (bool or string)."""
+    dm = pd.Series(s).fillna(False)
+    if dm.dtype == object:
+        return (
+            dm.astype(str).str.lower().isin(("true", "1", "t")).to_numpy(dtype=bool)
+        )
+    return dm.astype(bool).to_numpy()
+
+
+def _ever_dead_and_ppd_for_diagram(
+    df_dead: pd.DataFrame | None,
+) -> tuple[set[str] | None, set[str] | None]:
+    """Cumulative dead/PPD for architecture coloring (all checkpoints).
+
+    Black if the neuron was ever PPD; gray if it was ever dead and never PPD.
+    """
+    if df_dead is None or df_dead.empty:
+        return None, None
+    dead_mask = _is_dead_column_to_bool(pd.Series(df_dead["is_dead"]))
+    sub = df_dead.loc[dead_mask]
+    if sub.empty:
+        return None, None
+    ever_dead = {str(x) for x in sub["neuron_id"].tolist()}
+    if "is_ppd" in df_dead.columns:
+        pr = pd.Series(sub["is_ppd"]).fillna(False)
+        if pr.dtype == object:
+            ppd_mask = pr.astype(str).str.lower().isin(("true", "1", "t"))
+        else:
+            ppd_mask = pr.fillna(False).astype(bool)
+        ever_ppd = {
+            str(x) for x in sub.loc[ppd_mask, "neuron_id"].tolist()
+        }
+    else:
+        ever_ppd = set(ever_dead)
+    gray_dead = ever_dead - ever_ppd
+    return gray_dead, ever_ppd
+
+
+def _layer_recovery_events_cumsum(
+    layer_df: pd.DataFrame,
+    all_cp_idxs: list[int],
+) -> np.ndarray:
+    """Per checkpoint: cumulative count of dead→alive transitions in this layer.
+
+    A transition counts at the destination checkpoint index (first checkpoint
+    where the neuron is not dead after having been dead at the previous one).
+    """
+    n_cp = len(all_cp_idxs)
+    if n_cp == 0:
+        return np.array([], dtype=np.int64)
+    all_neurons = layer_df["neuron_id"].unique()
+    if len(all_neurons) == 0:
+        return np.zeros(n_cp, dtype=np.int64)
+
+    sub = layer_df[["neuron_id", "checkpoint_idx", "is_dead"]]
+    full_idx = pd.DataFrame(
+        [(n, c) for n in all_neurons for c in all_cp_idxs],
+        columns=["neuron_id", "checkpoint_idx"],
+    )
+    merged = full_idx.merge(sub, on=["neuron_id", "checkpoint_idx"], how="left")
+    dead = _is_dead_column_to_bool(merged["is_dead"].fillna(False))
+
+    events = np.zeros(n_cp, dtype=np.int64)
+    n_per = n_cp
+    for i, _nid in enumerate(all_neurons):
+        d = dead[i * n_per : (i + 1) * n_per]
+        for j in range(n_cp - 1):
+            if d[j] and not d[j + 1]:
+                events[j + 1] += 1
+    return np.cumsum(events)
+
+
+def compute_recovery_cumsum_by_layer(
+    df_dead: pd.DataFrame,
+    layer_order: list[str],
+) -> tuple[list[int], dict[str, np.ndarray]]:
+    """Cumulative recovery counts per hidden layer (excludes ``head``).
+
+    Recomputed from ``df_dead`` only (no extra columns required). A recovery is
+    when ``is_dead`` goes from true to false between consecutive checkpoints.
+    """
+    hidden = [ln for ln in layer_order if ln != "head"]
+    if not hidden or df_dead is None or df_dead.empty:
+        return [], {}
+
+    sub = df_dead[df_dead["layer_name"].isin(hidden)]
+    if sub.empty:
+        return [], {}
+
+    all_cp_idxs = sorted(x for x in sub["checkpoint_idx"].unique().tolist())
+    out: dict[str, np.ndarray] = {}
+    for ln in hidden:
+        layer_df = sub[sub["layer_name"] == ln]
+        out[ln] = _layer_recovery_events_cumsum(layer_df, all_cp_idxs)
+    return all_cp_idxs, out
+
+
+def per_neuron_recovery_counts(
+    df_dead: pd.DataFrame,
+    layer_order: list[str],
+) -> dict[str, int]:
+    """Total recovery transitions per neuron (hidden layers only; excludes ``head``)."""
+    hidden = [ln for ln in layer_order if ln != "head"]
+    if not hidden or df_dead is None or df_dead.empty:
+        return {}
+
+    sub = df_dead[df_dead["layer_name"].isin(hidden)]
+    if sub.empty:
+        return {}
+
+    counts: dict[str, int] = {
+        str(x): 0 for x in sub["neuron_id"].unique()
+    }
+    for ln in hidden:
+        layer_df = sub[sub["layer_name"] == ln]
+        all_cp_idxs = sorted(x for x in layer_df["checkpoint_idx"].unique().tolist())
+        n_cp = len(all_cp_idxs)
+        if n_cp < 2:
+            continue
+        all_neurons = layer_df["neuron_id"].unique()
+        cols = layer_df[["neuron_id", "checkpoint_idx", "is_dead"]]
+        full_idx = pd.DataFrame(
+            [(n, c) for n in all_neurons for c in all_cp_idxs],
+            columns=["neuron_id", "checkpoint_idx"],
+        )
+        merged = full_idx.merge(cols, on=["neuron_id", "checkpoint_idx"], how="left")
+        dead = _is_dead_column_to_bool(merged["is_dead"].fillna(False))
+        n_per = n_cp
+        for i, nid in enumerate(all_neurons):
+            d = dead[i * n_per : (i + 1) * n_per]
+            n_rec = 0
+            for j in range(n_cp - 1):
+                if d[j] and not d[j + 1]:
+                    n_rec += 1
+            counts[str(nid)] += n_rec
+    return counts
+
+
+def _build_recovery_cumsum_plot(
+    df_dead: pd.DataFrame,
+    metrics: dict[str, np.ndarray],
+    layer_order: list[str],
+) -> go.Figure:
+    """Line chart: cumulative dead→active recoveries per hidden layer (not head)."""
+    hidden = [ln for ln in layer_order if ln != "head"]
+    all_cp_idxs, by_layer = compute_recovery_cumsum_by_layer(df_dead, layer_order)
+    if not hidden or not all_cp_idxs:
+        return _empty("No recovery data (need dead-neuron table and hidden layers).", h=220)
+
+    tags = [str(t) for t in metrics.get("checkpoint_tags", [])]
+    cp_iters = metrics.get("checkpoint_iterations")
+    use_iter = cp_iters is not None and len(cp_iters) == len(tags)
+
+    fig = go.Figure()
+    any_trace = False
+    for li, layer_name in enumerate(hidden):
+        cum = by_layer.get(layer_name)
+        if cum is None or len(cum) != len(all_cp_idxs):
+            continue
+        color = _LAYER_COMBINED_COLORS[li % len(_LAYER_COMBINED_COLORS)]
+        x_vals = [
+            float(cp_iters[ci]) if use_iter and cp_iters is not None else float(ci)
+            for ci in all_cp_idxs
+        ]
+        display_name = layer_name.replace("hidden.", "H").replace("head", "Head")
+        fig.add_trace(
+            go.Scatter(
+                x=x_vals,
+                y=cum.tolist(),
+                mode="lines+markers",
+                name=display_name,
+                line=dict(width=1.5, color=color),
+                marker=dict(size=5, color=color),
+            )
+        )
+        any_trace = True
+
+    if not any_trace:
+        return _empty("No recovery traces to plot.", h=220)
+
+    _style(
+        fig,
+        title=dict(
+            text="Cumulative recovery count (dead -> active) — hidden layers",
+            font=dict(size=13),
+        ),
+        height=380,
+    )
+    fig.update_xaxes(title_text="Iteration" if use_iter else "Checkpoint")
+    fig.update_yaxes(title_text="Cumulative recoveries")
+    _add_trial_boundaries(fig, metrics, "iteration" if use_iter else "checkpoint")
+    return fig
+
+
+def _build_layer_inactive_count(
+    layer_name: str,
+    df_nd: pd.DataFrame,
+    metrics: dict[str, np.ndarray],
+) -> go.Figure:
+    """Line chart: number of inactive neurons per digit over checkpoints."""
+    layer_df = df_nd[df_nd["layer_name"] == layer_name]
+    all_cp_idxs = sorted(layer_df["checkpoint_idx"].unique())
+
+    tags = [str(t) for t in metrics.get("checkpoint_tags", [])]
+    cp_iters = metrics.get("checkpoint_iterations")
+    use_iter = cp_iters is not None and len(cp_iters) == len(tags)
+
+    inactive = layer_df[layer_df["status"] == "inactive"]
+    counts = (
+        inactive.groupby(["checkpoint_idx", "digit"])
+        .size()
+        .reset_index(name="count")
+    )
+    lookup = counts.set_index(["checkpoint_idx", "digit"])["count"]
+
+    fig = go.Figure()
+    for d in range(_NETWORK_N_DIGITS):
+        x_full: list[float] = []
+        y_full: list[int] = []
+        for ci in all_cp_idxs:
+            x_full.append(
+                float(cp_iters[ci]) if use_iter and cp_iters is not None else float(ci)
+            )
+            y_full.append(int(lookup.get((ci, d), 0)))
+        fig.add_trace(
+            go.Scatter(
+                x=x_full,
+                y=y_full,
+                mode="lines+markers",
+                name=f"Digit {d}",
+                line=dict(color=_DIGIT_COLORS[d], width=1.5),
+                marker=dict(size=3),
+            )
+        )
+
+    display_name = (
+        layer_name.replace("hidden.", "H").replace("head", "Head")
+    )
+    _style(
+        fig,
+        title=dict(
+            text=f"Inactive neuron count per digit — {display_name}",
+            font=dict(size=13),
+        ),
+        height=300,
+    )
+    fig.update_xaxes(title_text="Iteration" if use_iter else "Checkpoint")
+    fig.update_yaxes(title_text="Count")
+    _add_trial_boundaries(fig, metrics, "iteration" if use_iter else "checkpoint")
+    return fig
+
+
+def _build_layer_digit_count_plot(
+    layer_name: str,
+    df_nd: pd.DataFrame,
+    metrics: dict[str, np.ndarray],
+    status: str,
+    title_verb: str,
+    *,
+    boxplot: bool = False,
+) -> go.Figure:
+    """Per-neuron digit-count for *status* across checkpoints.
+
+    For each (neuron, checkpoint), count how many digits have the given *status*.
+
+    * ``boxplot=True``: boxplot of the distribution across neurons (legacy).
+    * ``boxplot=False`` (default): mean ± 1.96·SE ribbon across neurons, plus mean
+      (line+markers) and max (markers) per checkpoint.
+    """
+    layer_df = df_nd[df_nd["layer_name"] == layer_name]
+    all_neurons = layer_df["neuron_id"].unique()
+    all_cp_idxs = sorted(layer_df["checkpoint_idx"].unique())
+
+    tags = [str(t) for t in metrics.get("checkpoint_tags", [])]
+    cp_iters = metrics.get("checkpoint_iterations")
+    use_iter = cp_iters is not None and len(cp_iters) == len(tags)
+
+    matched = layer_df[layer_df["status"] == status]
+    per_nc = (
+        matched.groupby(["neuron_id", "checkpoint_idx"])
+        .size()
+        .reset_index(name="n")
+    )
+    full_idx = pd.DataFrame(
+        [(n, c) for n in all_neurons for c in all_cp_idxs],
+        columns=["neuron_id", "checkpoint_idx"],
+    )
+    per_nc = full_idx.merge(per_nc, on=["neuron_id", "checkpoint_idx"], how="left")
+    per_nc["n"] = per_nc["n"].fillna(0).astype(int)
+
+    display_name = (
+        layer_name.replace("hidden.", "H").replace("head", "Head")
+    )
+    base_color = C["blue"] if status == "assigned" else C["red"]
+
+    if boxplot:
+        all_x: list[str] = []
+        all_y: list[int] = []
+        for ci in all_cp_idxs:
+            label = (
+                str(int(cp_iters[ci])) if use_iter and cp_iters is not None else str(ci)
+            )
+            vals = per_nc.loc[per_nc["checkpoint_idx"] == ci, "n"].values
+            all_x.extend([label] * len(vals))
+            all_y.extend(vals.tolist())
+
+        fig = go.Figure()
+        fig.add_trace(
+            go.Box(
+                x=all_x,
+                y=all_y,
+                boxpoints="outliers",
+                marker_color=base_color,
+                showlegend=False,
+            )
+        )
+        title_text = f"{title_verb} digit count distribution — {display_name}"
+    else:
+        x_labels: list[str] = []
+        means: list[float] = []
+        ses: list[float] = []
+        maxs: list[float] = []
+        for ci in all_cp_idxs:
+            label = (
+                str(int(cp_iters[ci])) if use_iter and cp_iters is not None else str(ci)
+            )
+            x_labels.append(label)
+            vals = per_nc.loc[per_nc["checkpoint_idx"] == ci, "n"].values.astype(
+                np.float64
+            )
+            n = int(vals.size)
+            m = float(np.mean(vals)) if n else 0.0
+            if n > 1:
+                se = float(np.std(vals, ddof=1) / np.sqrt(n))
+            else:
+                se = 0.0
+            means.append(m)
+            ses.append(se)
+            maxs.append(float(np.max(vals)) if n else 0.0)
+
+        upper = [m + 1.96 * s for m, s in zip(means, ses)]
+        lower = [m - 1.96 * s for m, s in zip(means, ses)]
+        fill_rgba = _hex_to_rgba(base_color, 0.22)
+
+        fig = go.Figure()
+        fig.add_trace(
+            go.Scatter(
+                x=x_labels,
+                y=upper,
+                mode="lines",
+                line=dict(width=0),
+                showlegend=False,
+                hoverinfo="skip",
+            )
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=x_labels,
+                y=lower,
+                mode="lines",
+                line=dict(width=0),
+                fillcolor=fill_rgba,
+                fill="tonexty",
+                name="Mean ± 1.96·SE",
+                hoverinfo="skip",
+            )
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=x_labels,
+                y=means,
+                mode="lines+markers",
+                name="Mean",
+                line=dict(width=1.5, color=base_color),
+                marker=dict(size=6, color=base_color),
+                hovertemplate="%{x}<br>mean %{y:.2f}<extra></extra>",
+            )
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=x_labels,
+                y=maxs,
+                mode="markers",
+                name="Max",
+                marker=dict(size=8, color=base_color, symbol="x", line=dict(width=1)),
+                hovertemplate="%{x}<br>max %{y:.0f}<extra></extra>",
+            )
+        )
+        title_text = f"{title_verb} digit count (mean ± 1.96·SE) — {display_name}"
+
+    _style(
+        fig,
+        title=dict(
+            text=title_text,
+            font=dict(size=13),
+        ),
+        height=300,
+    )
+    fig.update_xaxes(title_text="Iteration" if use_iter else "Checkpoint")
+    fig.update_yaxes(title_text=f"# {status} digits", range=[-0.5, _NETWORK_N_DIGITS + 0.5])
+    _add_trial_boundaries(fig, metrics, "iteration" if use_iter else "checkpoint")
+    return fig
+
+
+def _build_layer_digit_count_non_head_combined(
+    df_nd: pd.DataFrame,
+    metrics: dict[str, np.ndarray],
+    layer_order: list[str],
+    status: str,
+    title_verb: str,
+) -> go.Figure:
+    """Mean ± 1.96·SE ribbon per non-head layer on one figure (numeric x-axis)."""
+    non_head = [ln for ln in layer_order if ln != "head"]
+    if not non_head:
+        return _empty("No non-head layers.", h=200)
+
+    tags = [str(t) for t in metrics.get("checkpoint_tags", [])]
+    cp_iters = metrics.get("checkpoint_iterations")
+    use_iter = cp_iters is not None and len(cp_iters) == len(tags)
+
+    fig = go.Figure()
+    any_trace = False
+    for li, layer_name in enumerate(non_head):
+        color = _LAYER_COMBINED_COLORS[li % len(_LAYER_COMBINED_COLORS)]
+        layer_df = df_nd[df_nd["layer_name"] == layer_name]
+        all_neurons = layer_df["neuron_id"].unique()
+        all_cp_idxs = sorted(layer_df["checkpoint_idx"].unique())
+        if not len(all_cp_idxs):
+            continue
+
+        matched = layer_df[layer_df["status"] == status]
+        per_nc = (
+            matched.groupby(["neuron_id", "checkpoint_idx"])
+            .size()
+            .reset_index(name="n")
+        )
+        full_idx = pd.DataFrame(
+            [(n, c) for n in all_neurons for c in all_cp_idxs],
+            columns=["neuron_id", "checkpoint_idx"],
+        )
+        per_nc = full_idx.merge(per_nc, on=["neuron_id", "checkpoint_idx"], how="left")
+        per_nc["n"] = per_nc["n"].fillna(0).astype(int)
+
+        x_vals: list[float] = []
+        means: list[float] = []
+        ses: list[float] = []
+        for ci in all_cp_idxs:
+            x_vals.append(
+                float(cp_iters[ci]) if use_iter and cp_iters is not None else float(ci)
+            )
+            vals = per_nc.loc[per_nc["checkpoint_idx"] == ci, "n"].values.astype(
+                np.float64
+            )
+            n = int(vals.size)
+            m = float(np.mean(vals)) if n else 0.0
+            if n > 1:
+                se = float(np.std(vals, ddof=1) / np.sqrt(n))
+            else:
+                se = 0.0
+            means.append(m)
+            ses.append(se)
+
+        upper = [m + 1.96 * s for m, s in zip(means, ses)]
+        lower = [m - 1.96 * s for m, s in zip(means, ses)]
+        fill_rgba = _hex_to_rgba(color, 0.22)
+        display_name = layer_name.replace("hidden.", "H").replace("head", "Head")
+
+        x_poly = x_vals + x_vals[::-1]
+        y_poly = upper + lower[::-1]
+        fig.add_trace(
+            go.Scatter(
+                x=x_poly,
+                y=y_poly,
+                fill="toself",
+                fillcolor=fill_rgba,
+                line=dict(width=0),
+                mode="lines",
+                showlegend=False,
+                legendgroup=display_name,
+                hoverinfo="skip",
+            )
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=x_vals,
+                y=means,
+                mode="lines+markers",
+                name=display_name,
+                legendgroup=display_name,
+                line=dict(width=1.5, color=color),
+                marker=dict(size=5, color=color),
+            )
+        )
+        any_trace = True
+
+    if not any_trace:
+        return _empty("No checkpoint data for non-head layers.", h=200)
+
+    title_text = f"{title_verb} digit count (mean ± 1.96·SE) — all layers except Head"
+    _style(
+        fig,
+        title=dict(
+            text=title_text,
+            font=dict(size=13),
+        ),
+        height=400,
+    )
+    fig.update_xaxes(title_text="Iteration" if use_iter else "Checkpoint")
+    fig.update_yaxes(
+        title_text=f"# {status} digits",
+        range=[-0.5, _NETWORK_N_DIGITS + 0.5],
+    )
+    _add_trial_boundaries(fig, metrics, "iteration" if use_iter else "checkpoint")
+    return fig
+
+
+def _build_dead_layer_traces(
+    layer_name: str,
+    df_nd: pd.DataFrame,
+    df_dead: pd.DataFrame,
+    metrics: dict[str, np.ndarray],
+    *,
+    neuron_ids: set[str] | frozenset[str] | list[str] | None = None,
+    title: str | None = None,
+    empty_message: str | None = None,
+) -> go.Figure:
+    """Per dead neuron: inactive-digit count over time (one trace per dead neuron)."""
+    layer_dead = df_dead[
+        (df_dead["layer_name"] == layer_name) & df_dead["is_dead"]
+    ]
+    raw = layer_dead["neuron_id"].unique()
+    if neuron_ids is not None:
+        allow = {str(x) for x in neuron_ids}
+        ever_dead_nids = [n for n in raw if str(n) in allow]
+    else:
+        ever_dead_nids = list(raw)
+
+    empty_default = "No dead neurons in this layer."
+    if len(ever_dead_nids) == 0:
+        return _empty(empty_message if empty_message is not None else empty_default, h=200)
+
+    tags = [str(t) for t in metrics.get("checkpoint_tags", [])]
+    cp_iters = metrics.get("checkpoint_iterations")
+    use_iter = cp_iters is not None and len(cp_iters) == len(tags)
+
+    layer_nd = df_nd[df_nd["layer_name"] == layer_name]
+    inactive_counts = (
+        layer_nd[layer_nd["status"] == "inactive"]
+        .groupby(["neuron_id", "checkpoint_idx"])
+        .size()
+        .reset_index(name="n_inactive")
+    )
+    all_cp_idxs = sorted(layer_nd["checkpoint_idx"].unique())
+
+    fig = go.Figure()
+    for nid in ever_dead_nids:
+        nc = inactive_counts[inactive_counts["neuron_id"] == nid].set_index(
+            "checkpoint_idx"
+        )["n_inactive"]
+        xs: list[float] = []
+        ys: list[int] = []
+        for ci in all_cp_idxs:
+            xs.append(
+                float(cp_iters[ci]) if use_iter and cp_iters is not None else float(ci)
+            )
+            ys.append(int(nc.get(ci, 0)))
+        fig.add_trace(
+            go.Scatter(
+                x=xs,
+                y=ys,
+                mode="lines+markers",
+                name=_compact_neuron_label(nid),
+                marker=dict(size=3),
+                line=dict(width=1.5),
+            )
+        )
+
+    display_name = (
+        layer_name.replace("hidden.", "H").replace("head", "Head")
+    )
+    head = title if title is not None else "Dead neurons"
+    _style(
+        fig,
+        title=dict(
+            text=f"{head} — inactive digit count — {display_name}",
+            font=dict(size=13),
+        ),
+        height=320,
+    )
+    fig.update_xaxes(title_text="Iteration" if use_iter else "Checkpoint")
+    fig.update_yaxes(
+        title_text="# inactive digits",
+        range=[-0.5, _NETWORK_N_DIGITS + 0.5],
+    )
+    _add_trial_boundaries(fig, metrics, "iteration" if use_iter else "checkpoint")
+    _add_show_hide(fig)
+    return fig
+
+
+def _build_dead_neuron_pre_nl_grid(
+    nid: str,
+    eid: str,
+    mid: str,
+    oid: str,
+    *,
+    rid: str,
+) -> go.Figure:
+    """2x5 grid of pre-NL activation over time per digit (N=10, K=5 eval samples each).
+
+    Batch layout matches ``MNISTWrapper.evaluation_inputs`` / checkpoint capture:
+    sample index ``5*d + k`` for digit ``d`` and eval-sample slot ``k`` in ``{0..4}``.
+    """
+    nts = _nts(eid, mid, oid, rid=rid)
+    metrics = _metrics(eid, mid, oid, rid=rid)
+    A = _activation_sample_matrix(nts, nid)
+
+    tags = [str(t) for t in nts.get("checkpoint_tags", [])]
+    cp_iters_raw = metrics.get("checkpoint_iterations")
+    if cp_iters_raw is None or len(cp_iters_raw) != len(tags):
+        return _empty("Checkpoint iterations not available", 200)
+    x_iters = np.array(cp_iters_raw, dtype=float)
+
+    if A is None or A.shape[1] != _NETWORK_EXPECTED_BATCH:
+        return _empty("Activation data unavailable for this neuron.", 200)
+
+    subplot_titles = [f"Digit {d}" for d in range(_NETWORK_N_DIGITS)]
+    fig = make_subplots(
+        rows=_NEURON_ACT_GRID_ROWS,
+        cols=_NEURON_ACT_GRID_COLS,
+        subplot_titles=subplot_titles,
+        vertical_spacing=0.08,
+        horizontal_spacing=0.08,
+    )
+
+    for d in range(_NETWORK_N_DIGITS):
+        r = d // _NEURON_ACT_GRID_COLS + 1
+        c = d % _NEURON_ACT_GRID_COLS + 1
+        block = A[:, d * _NETWORK_SAMPLES_PER_DIGIT : (d + 1) * _NETWORK_SAMPLES_PER_DIGIT]
+        for k in range(_NETWORK_SAMPLES_PER_DIGIT):
+            y_k = block[:, k]
+            fig.add_trace(
+                go.Scatter(
+                    x=x_iters,
+                    y=y_k,
+                    mode="lines+markers",
+                    name=f"K={k + 1}",
+                    line=dict(color=_NETWORK_EVAL_K_LINE_COLORS[k], width=1.5),
+                    marker=dict(size=3),
+                    showlegend=(d == 0),
+                ),
+                row=r,
+                col=c,
+            )
+        y_min = float(np.nanmin(block)) if np.any(np.isfinite(block)) else -1.0
+        fig.update_yaxes(
+            range=[y_min * 1.1 if y_min < 0 else -0.1, 0.0],
+            row=r,
+            col=c,
+        )
+        fig.update_xaxes(title_text="Iteration" if r == _NEURON_ACT_GRID_ROWS else "", row=r, col=c)
+
+    _style(
+        fig,
+        title=dict(
+            text=f"Pre-NL activation (dead neuron {_compact_neuron_label(nid)})",
+            font=dict(size=13),
+        ),
+        height=_NEURON_ACT_GRID_ROWS * 160,
+    )
+    _add_trial_boundaries(fig, metrics, "iteration")
+    return fig
+
+
+def _build_dead_neuron_inactivity_bar(
+    nid: str,
+    pp_ta: dict[str, np.ndarray],
+) -> go.Figure:
+    """Bar chart: per-digit inactivity ratio from the full training-set forward pass."""
+    safe = nid.replace(":", "__")
+    key = f"act__{safe}"
+    labels = pp_ta.get("digit_labels")
+    acts = pp_ta.get(key)
+
+    if labels is None or acts is None:
+        return _empty("Training-set activation data not available.", 200)
+
+    labels = np.asarray(labels, dtype=int)
+    acts = np.asarray(acts, dtype=np.float64)
+    post_nl = F.relu(torch.from_numpy(acts)).numpy()
+
+    digits = list(range(_NETWORK_N_DIGITS))
+    ratios: list[float] = []
+    for d in digits:
+        mask = labels == d
+        n_total = int(mask.sum())
+        if n_total == 0:
+            ratios.append(0.0)
+            continue
+        n_inactive = int(np.sum(post_nl[mask] == 0))
+        ratios.append(n_inactive / n_total)
+
+    fig = go.Figure()
+    fig.add_trace(
+        go.Bar(
+            x=[str(d) for d in digits],
+            y=ratios,
+            marker_color=[_DIGIT_COLORS[d] for d in digits],
+            showlegend=False,
+        )
+    )
+
+    _style(
+        fig,
+        title=dict(
+            text=f"Inactivity ratio on training set — {_compact_neuron_label(nid)}",
+            font=dict(size=13),
+        ),
+        height=300,
+    )
+    fig.update_xaxes(title_text="Digit")
+    fig.update_yaxes(title_text="Inactivity ratio", range=[0, 1.05])
     return fig
 
 
@@ -1628,11 +2908,10 @@ def _serve_layout() -> html.Div:
                     ),
                 ],
             ),
-            # -- section 2: neuron analysis --
+            # -- section 2: neuron / network analysis --
             html.Section(
                 className="section",
                 children=[
-                    html.H2("Neuron Analysis"),
                     html.Div(
                         className="controls-row",
                         children=[
@@ -1760,18 +3039,93 @@ def _serve_layout() -> html.Div:
                         max_intervals=-1,
                     ),
                     html.Div(
-                        className="neuron-detail",
+                        id="panel-neuron-analysis",
+                        style={"display": "block"},
                         children=[
-                            html.P(
-                                "Click a node in the diagram above to inspect it.",
-                                id="hint-text",
-                                className="hint-text",
+                            html.H2("Neuron Analysis"),
+                            html.Div(
+                                className="neuron-viz-toggles",
+                                children=[
+                                    html.Div(
+                                        [
+                                            html.Label("Viz type"),
+                                            dcc.RadioItems(
+                                                id="radio-viz-type",
+                                                options=[
+                                                    {"label": "Timeseries", "value": "timeseries"},
+                                                    {"label": "Scatter", "value": "scatter"},
+                                                ],
+                                                value="timeseries",
+                                                inline=True,
+                                                className="analysis-mode-radio",
+                                                inputClassName="analysis-mode-radio-input",
+                                                labelClassName="analysis-mode-radio-label",
+                                            ),
+                                        ],
+                                        className="ctrl-inline",
+                                    ),
+                                    html.Div(
+                                        [
+                                            html.Label("Non-linearity"),
+                                            dcc.RadioItems(
+                                                id="radio-nonlinearity",
+                                                options=[
+                                                    {"label": "Pre NL", "value": "pre"},
+                                                    {"label": "Post NL", "value": "post"},
+                                                ],
+                                                value="pre",
+                                                inline=True,
+                                                className="analysis-mode-radio",
+                                                inputClassName="analysis-mode-radio-input",
+                                                labelClassName="analysis-mode-radio-label",
+                                            ),
+                                        ],
+                                        className="ctrl-inline",
+                                    ),
+                                ],
                             ),
-                            dcc.Graph(
-                                id="graph-neuron-detail",
-                                figure=_empty("", 100),
-                                mathjax=True,
-                                className="neuron-graph",
+                            html.Div(
+                                id="k-checklist-wrap",
+                                className="network-k-checklist-wrap",
+                                style={"display": "none"},
+                                children=[
+                                    html.Label(
+                                        "Visible K",
+                                        htmlFor="checklist-network-k-visible",
+                                        className="network-k-checklist-label",
+                                    ),
+                                    dcc.Checklist(
+                                        id="checklist-network-k-visible",
+                                        className="network-k-checklist",
+                                        options=[
+                                            {"label": "K=1 (Teal)", "value": "0"},
+                                            {"label": "K=2 (speed)", "value": "1"},
+                                            {"label": "K=3 (Purp)", "value": "2"},
+                                            {"label": "K=4 (Brwnyl)", "value": "3"},
+                                            {"label": "K=5 (Greys_r)", "value": "4"},
+                                        ],
+                                        value=["0", "1", "2", "3", "4"],
+                                        inline=True,
+                                        inputClassName="network-k-check-input",
+                                        labelClassName="network-k-check-label",
+                                    ),
+                                ],
+                            ),
+                            html.Div(
+                                className="neuron-detail",
+                                children=[
+                                    html.P(
+                                        "Click a node in the diagram above to inspect it.",
+                                        id="hint-text",
+                                        className="hint-text",
+                                    ),
+                                    dcc.Graph(
+                                        id="graph-neuron-detail",
+                                        figure=_empty("", 100),
+                                        mathjax=True,
+                                        className="neuron-graph",
+                                    ),
+                                ],
                             ),
                         ],
                     ),
@@ -1910,8 +3264,8 @@ def _cb_slider(
         if labeled_idxs[-1] != n - 1:
             labeled_idxs.append(n - 1)
 
-    stage_tick = "\u275A"
-    stage_style = {"fontSize": "14px", "color": C["accent"], "fontWeight": "700"}
+    trial_tick = "\u275A"
+    trial_tick_style = {"fontSize": "14px", "color": C["accent"], "fontWeight": "700"}
     label_style = {"fontSize": "10px", "color": C["muted"]}
 
     if use_iter and cp_iters_raw is not None:
@@ -1922,14 +3276,14 @@ def _cb_slider(
         labeled_set = {cp_list[i] for i in labeled_idxs}
 
 
-        stage_indices = _stage_switch_checkpoint_indices(metrics)
-        stage_iters = {cp_list[sw] for sw in stage_indices if 0 <= sw < n}
-        visible_iters = set(labeled_set) | stage_iters
+        trial_switch_indices = _trial_switch_checkpoint_indices(metrics)
+        trial_switch_iters = {cp_list[sw] for sw in trial_switch_indices if 0 <= sw < n}
+        visible_iters = set(labeled_set) | trial_switch_iters
 
         marks: dict[int, Any] = {}
         for it in visible_iters:
-            if it in stage_iters:
-                marks[it] = {"label": stage_tick, "style": stage_style}
+            if it in trial_switch_iters:
+                marks[it] = {"label": trial_tick, "style": trial_tick_style}
             else:
                 marks[it] = {"label": str(it), "style": label_style}
 
@@ -1941,17 +3295,17 @@ def _cb_slider(
             i: {"label": tags[i], "style": label_style}
             for i in labeled_idxs
         }
-        for sw in _stage_switch_checkpoint_indices(metrics):
+        for sw in _trial_switch_checkpoint_indices(metrics):
             if sw < 0 or sw >= n:
                 continue
             if sw in marks_idx:
                 m = marks_idx[sw]
                 lab = m.get("label", "") if isinstance(m, dict) else str(m)
                 st = dict(m.get("style") or {}) if isinstance(m, dict) else {}
-                label_text = f"{stage_tick} {lab}" if lab else stage_tick
-                marks_idx[sw] = {"label": label_text, "style": {**st, **stage_style}}
+                label_text = f"{trial_tick} {lab}" if lab else trial_tick
+                marks_idx[sw] = {"label": label_text, "style": {**st, **trial_tick_style}}
             else:
-                marks_idx[sw] = {"label": stage_tick, "style": stage_style}
+                marks_idx[sw] = {"label": trial_tick, "style": trial_tick_style}
         # Start at checkpoint index 0 when optimizer changes.
         return n - 1, marks_idx, 0, False, 1, None
 
@@ -2139,6 +3493,9 @@ def _cb_diagram(
     m = _metrics(eid, mid, ref_oid, rid=rid)
     cp_iters = m.get("checkpoint_iterations") if m else None
 
+    df_dead = _pp_dead(eid, mid, ref_oid, rid=rid) if oid else None
+    gray_dead, ever_ppd = _ever_dead_and_ppd_for_diagram(df_dead)
+
     def _fig_at_checkpoint(ci: int | None) -> go.Figure:
         return _build_diagram(
             units,
@@ -2146,6 +3503,8 @@ def _cb_diagram(
             act_nts=nts if oid else None,
             checkpoint_idx=ci,
             show_hint=(oid is None),
+            dead_node_ids=gray_dead,
+            ppd_node_ids=ever_ppd,
         )
 
     if n_cp == 0 or slider_val is None:
@@ -2250,15 +3609,32 @@ def _cb_neuron_smooth_spin(
     return no_update
 
 
+def _neuron_should_reset_k() -> bool:
+    """True unless the only trigger was the K checklist."""
+    t = callback_context.triggered
+    if not t:
+        return True
+    if len(t) == 1 and t[0].get("prop_id", "").startswith(
+        "checklist-network-k-visible"
+    ):
+        return False
+    return True
+
+
 @app.callback(
     Output("graph-neuron-detail", "figure"),
     Output("hint-text", "children"),
+    Output("k-checklist-wrap", "style"),
+    Output("checklist-network-k-visible", "value"),
     Input("store-node", "data"),
     Input("dd-optimizer", "value"),
     Input("dd-experiment", "value"),
     Input("dd-model", "value"),
     Input("dd-run", "value"),
     Input("input-neuron-smooth", "value"),
+    Input("radio-viz-type", "value"),
+    Input("radio-nonlinearity", "value"),
+    Input("checklist-network-k-visible", "value"),
 )
 def _cb_neuron(
     nid: str | None,
@@ -2267,24 +3643,60 @@ def _cb_neuron(
     mid: str | None,
     rid: str | None,
     smooth_raw: Any,
+    viz_type: str | None,
+    nonlinearity: str | None,
+    k_checklist: list[str] | None,
 ):
     hint_default = "Click a node in the diagram above to inspect it."
     empty = _empty("", 100)
     smooth_w = _parse_neuron_smooth_window(smooth_raw)
+    is_scatter = viz_type == "scatter"
+    post_nl = nonlinearity == "post"
+
+    k_wrap_style = {"display": "block"} if is_scatter else {"display": "none"}
+
+    all_k = [str(k) for k in range(_NETWORK_SAMPLES_PER_DIGIT)]
+    reset_k = _neuron_should_reset_k()
+    if reset_k:
+        k_sel = set(all_k)
+        checklist_out: Any = list(all_k)
+    else:
+        checklist_out = no_update
+        k_sel = set(k_checklist) if k_checklist else set(all_k)
+
     if nid is None or eid is None or mid is None or rid is None:
-        return empty, hint_default
+        return empty, hint_default, k_wrap_style, checklist_out
     if oid is None:
-        return empty, "⚠ Select an optimizer above first, then click a node."
+        return (
+            empty,
+            "Select an optimizer above first, then click a node.",
+            k_wrap_style,
+            checklist_out,
+        )
 
     nts = _nts(eid, mid, oid, rid=rid)
     safe = nid.replace(":", "__")
     if f"act__{safe}" not in nts:
-        return empty, hint_default
+        return empty, hint_default, k_wrap_style, checklist_out
 
-    fig = _build_neuron_detail_figure(
-        nid, eid, mid, oid, rid=rid, smooth_window=smooth_w
-    )
-    return fig, f"Selected: {nid}"
+    if is_scatter:
+        k_vis = [str(k) in k_sel for k in range(_NETWORK_SAMPLES_PER_DIGIT)]
+        fig = _build_network_activation_figure(
+            nid, eid, mid, oid,
+            rid=rid,
+            k_visible=k_vis,
+            post_nonlinearity=post_nl,
+        )
+    else:
+        fig = _build_neuron_detail_figure(
+            nid, eid, mid, oid,
+            rid=rid,
+            smooth_window=smooth_w,
+            post_nonlinearity=post_nl,
+        )
+    return fig, f"Selected: {nid}", k_wrap_style, checklist_out
+
+
 
 
 # -- Entry point --------------------------------------------------------------

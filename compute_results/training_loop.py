@@ -1,11 +1,12 @@
-"""Generic training loop that iterates through experiment stages."""
+"""Generic training loop that iterates through experiment trials."""
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 from tqdm import tqdm
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from compute_results.checkpoint import (
     NeuronTimeseriesCollector,
@@ -14,13 +15,53 @@ from compute_results.checkpoint import (
     extract_unit_activations,
     save_model_checkpoint,
 )
+from compute_results.post_processing import compute_post_processing
 from compute_results.config_guard import parse_checkpoint_cadence
-from experiments.base import Experiment, StageSpec
+from experiments.base import Experiment, TrialSpec
 from models.base import AnalyzableModel
 from optimizers.base import OptimizerSignalExtractor
 
 
 NUM_SWITCH_FINEGRAIN_ITS = 20
+
+
+class SoftmaxMSELoss(nn.Module):
+    """MSE between softmax(logits) and one-hot class indices."""
+
+    def __init__(self, num_classes: int):
+        super().__init__()
+        self.num_classes = num_classes
+
+    def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        probs = torch.softmax(logits, dim=1)
+        oh = F.one_hot(targets.long(), self.num_classes).float()
+        return F.mse_loss(probs, oh)
+
+
+def _num_classes_for_loss(model: AnalyzableModel) -> int:
+    fields = model.config_fields()
+    nc = fields.get("num_classes")
+    if nc is not None:
+        return int(nc)
+    for m in reversed(list(model.modules())):
+        if isinstance(m, nn.Linear):
+            return int(m.out_features)
+    raise ValueError(
+        "Cannot infer num_classes for MSE loss: set num_classes in model.config_fields() "
+        "or use a model whose last layer is nn.Linear."
+    )
+
+
+def _criterion_from_config(config: dict[str, Any], model: AnalyzableModel) -> nn.Module:
+    loss_key = str(config.get("loss", "ce"))
+    if loss_key == "ce":
+        return nn.CrossEntropyLoss()
+    if loss_key == "mse":
+        return SoftmaxMSELoss(_num_classes_for_loss(model))
+    raise ValueError(
+        f"Unknown loss in config: {loss_key!r}. Expected 'ce' or 'mse'."
+    )
+
 
 @torch.no_grad()
 def evaluate(
@@ -41,10 +82,31 @@ def evaluate(
         total_loss += criterion(logits, y).item() * y.size(0)
         correct += (logits.argmax(1) == y).sum().item()
         total += y.size(0)
-    model.train()
     if total == 0:
         return 0.0, 0.0
     return total_loss / total, correct / total
+
+
+def _drop_leading_once_only(trial_list: list[TrialSpec]) -> list[TrialSpec]:
+    """Remove a prefix of trials marked ``once_only`` (for pretrain checkpoint mode)."""
+    out = list(trial_list)
+    while out and out[0].once_only:
+        out.pop(0)
+    if not out:
+        raise ValueError(
+            "initial_model_mode 'pretrain' skipped all trials (only leading once_only trials)."
+        )
+    return out
+
+
+def resolve_save_model_path(template: str, optimizer_dir: Path) -> Path:
+    """Expand ``!OPT`` to *optimizer_dir*; otherwise resolve under *optimizer_dir*."""
+    t = template.strip()
+    if not t:
+        raise ValueError("save_model path is empty.")
+    if "!OPT" in t:
+        return Path(t.replace("!OPT", str(optimizer_dir)))
+    return optimizer_dir / Path(t)
 
 
 def _run_checkpoint(
@@ -65,6 +127,8 @@ def _run_checkpoint(
     train_loss_accum: list[float],
 ) -> None:
     """Optionally save .pt weights; always capture activations, metrics, evaluate."""
+    model.eval()
+    
     if save_model_cp:
         save_model_checkpoint(model, checkpoint_dir, tag)
 
@@ -95,7 +159,7 @@ def _run_checkpoint(
 
     metrics.setdefault("checkpoint_tags", []).append(tag)
     metrics.setdefault("checkpoint_iterations", []).append(iteration)
-
+    model.train()
 
 def train_with_config(
     *,
@@ -106,7 +170,7 @@ def train_with_config(
     device: torch.device,
     results_dir: Path,
 ) -> None:
-    """Run the full multi-stage training and save all outputs."""
+    """Run the full multi-trial training and save all outputs."""
     model = model.to(device)
     model.train()
 
@@ -115,29 +179,39 @@ def train_with_config(
     extractor.set_units(units)
 
     optimizer = extractor.create_optimizer(model.parameters())
-    criterion = nn.CrossEntropyLoss()
+    criterion = _criterion_from_config(config, model)
 
-    stage_epochs = config["stage_epochs"]
+    trial_epochs = int(
+        config.get("trial_epochs", config.get("stage_epochs", 1))
+    )
     batch_size = config["batch_size"]
     seed = config["seed"]
-    trials: int = int(config.get("trials", 1))
-    trial_variability: str = str(config.get("trial_variability", ""))
+    experiment_runs: int = int(
+        config.get("experiment_runs", config.get("trials", 1))
+    )
+    experiment_variability: str = str(
+        config.get("experiment_variability", config.get("trial_variability", ""))
+    )
     cadence_mode, cadence_k = parse_checkpoint_cadence(
         config.get("checkpoint_cadence", "every_epoch")
     )
     save_model_cp: bool = bool(config.get("save_model_cp", False))
     keep_tensors: bool = bool(config.get("internal_keep_tensors", False))
+    save_model_tmpl = str(config.get("save_model", "") or "").strip()
+    initial_mode = str(config.get("initial_model_mode", "init") or "init")
 
     checkpoint_dir = results_dir / "checkpoints"
     optimizer_dir = results_dir / "optimizers" / extractor.optimizer_id()
 
     if keep_tensors:
         experiment.to_device(device)
-    experiment.set_trial_var(trial_variability)
-    returned_stages = experiment.build_stages(batch_size=batch_size, seed=seed, num_trials=trials)
+    experiment.set_experiment_variability(experiment_variability)
+    returned_trials = experiment.build_trials(
+        batch_size=batch_size, seed=seed, num_experiment_runs=experiment_runs
+    )
 
-    assert returned_stages and len(returned_stages) > 0, "build_stages returned an empty list"
-    is_nested = isinstance(returned_stages[0], list)
+    assert returned_trials and len(returned_trials) > 0, "build_trials returned an empty list"
+    is_nested = isinstance(returned_trials[0], list)
 
     neuron_collector = NeuronTimeseriesCollector(units, keep_tensors=keep_tensors)
     persistent_capture = PersistentActivationCapture(model, keep_on_gpu=keep_tensors)
@@ -152,14 +226,14 @@ def train_with_config(
     iterations: list[int] = []
 
     all_eval_loaders: dict[str, torch.utils.data.DataLoader] = {}
-    for stage_or_stage_list in returned_stages:
+    for trial_or_trial_list in returned_trials:
         if is_nested:
-            assert isinstance(stage_or_stage_list, list)
-            for stage in stage_or_stage_list:
-                all_eval_loaders.update(stage.eval_loaders)
+            assert isinstance(trial_or_trial_list, list)
+            for trial in trial_or_trial_list:
+                all_eval_loaders.update(trial.eval_loaders)
         else:
-            assert isinstance(stage_or_stage_list, StageSpec)
-            all_eval_loaders.update(stage_or_stage_list.eval_loaders)
+            assert isinstance(trial_or_trial_list, TrialSpec)
+            all_eval_loaders.update(trial_or_trial_list.eval_loaders)
 
     _run_cp_kwargs: dict[str, Any] = {
         "model": model,
@@ -179,35 +253,43 @@ def train_with_config(
     _run_checkpoint(tag="init", iteration=0, **_run_cp_kwargs)
 
     global_iter = 0
-    stage_names_list: list[str] = []
-    stage_end_checkpoint_idxs: list[int] = []
-    stage_end_iterations_list: list[int] = []
+    trial_names_list: list[str] = []
+    trial_end_checkpoint_idxs: list[int] = []
+    trial_end_iterations_list: list[int] = []
 
-    for trial_idx in range(trials):
+    for run_idx in range(experiment_runs):
         if is_nested:
-            stages = returned_stages[trial_idx]
-        elif trial_idx > 0:
-            assert isinstance(returned_stages, list) and all(isinstance(s, StageSpec) for s in returned_stages)
-            stages = [s for s in returned_stages if not s.once_only] # type: ignore[attr-defined]
+            trials_this_run = list(cast(list[TrialSpec], returned_trials[run_idx]))
+        elif run_idx > 0:
+            assert isinstance(returned_trials, list) and all(isinstance(s, TrialSpec) for s in returned_trials)
+            trials_this_run = [s for s in returned_trials if not s.once_only] # type: ignore[attr-defined]
         else:
-            stages = returned_stages
+            trials_this_run = list(cast(list[TrialSpec], returned_trials))
 
-        tag_prefix = f"trial{trial_idx}_" if trials > 1 else ""
+        if run_idx == 0 and initial_mode == "pretrain":
+            trials_this_run = _drop_leading_once_only(cast(list[TrialSpec], trials_this_run))
 
-        for stage in stages: # type: ignore[attr-defined]
-            assert isinstance(stage, StageSpec)
-            # Stage start
+        tag_prefix = f"run{run_idx}_" if experiment_runs > 1 else ""
+
+        if run_idx == 0 and save_model_tmpl and initial_mode == "pretrain":
+            dest = resolve_save_model_path(save_model_tmpl, optimizer_dir)
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            torch.save(model.state_dict(), dest)
+
+        for trial in trials_this_run: # type: ignore[attr-defined]
+            assert isinstance(trial, TrialSpec)
+            # Trial start
             _run_checkpoint(
-                tag=f"sw_{tag_prefix}{stage.name}_entry",
+                tag=f"tsw_{tag_prefix}{trial.name}_entry",
                 iteration=max(0, global_iter - 1),
                 **_run_cp_kwargs,
             )
             sw_iters_remaining = NUM_SWITCH_FINEGRAIN_ITS
 
-            for epoch in range(stage_epochs):
+            for epoch in range(trial_epochs):
                 for x, y in tqdm(
-                    stage.train_loader,
-                    desc=f"{tag_prefix}{stage.name} epoch{epoch}",
+                    trial.train_loader,
+                    desc=f"{tag_prefix}{trial.name} epoch{epoch}",
                 ):
                     x, y = x.to(device), y.to(device)
                     optimizer.zero_grad()
@@ -233,7 +315,7 @@ def train_with_config(
                     if sw_iters_remaining > 0:
                         sw_iter_idx = (NUM_SWITCH_FINEGRAIN_ITS + 1) - sw_iters_remaining
                         _run_checkpoint(
-                            tag=f"sw_{tag_prefix}{stage.name}_iter{sw_iter_idx}",
+                            tag=f"tsw_{tag_prefix}{trial.name}_iter{sw_iter_idx}",
                             iteration=max(0, global_iter - 1),
                             **_run_cp_kwargs,
                         )
@@ -246,25 +328,30 @@ def train_with_config(
                         )
 
                 if cadence_mode == "every_epoch":
-                    tag = f"{tag_prefix}{stage.name}_epoch{epoch}"
+                    tag = f"{tag_prefix}{trial.name}_epoch{epoch}"
                     _run_checkpoint(
                         tag=tag,
                         iteration=max(0, global_iter - 1),
                         **_run_cp_kwargs,
                     )
 
-            if stage.post_stage_callback is not None:
-                stage.post_stage_callback(model)
+            if trial.post_trial_callback is not None:
+                trial.post_trial_callback(model)
                 _run_checkpoint(
-                    tag=f"{tag_prefix}{stage.name}_post_callback",
+                    tag=f"{tag_prefix}{trial.name}_post_callback",
                     iteration=max(0, global_iter - 1),
                     **_run_cp_kwargs,
                 )
 
-            # Record stage boundary (last checkpoint index and last iteration of this stage)
-            stage_names_list.append(f"{tag_prefix}{stage.name}")
-            stage_end_checkpoint_idxs.append(len(metrics["checkpoint_tags"]) - 1)
-            stage_end_iterations_list.append(global_iter - 1 if global_iter > 0 else 0)
+            # Record trial boundary (last checkpoint index and last iteration of this trial)
+            trial_names_list.append(f"{tag_prefix}{trial.name}")
+            trial_end_checkpoint_idxs.append(len(metrics["checkpoint_tags"]) - 1)
+            trial_end_iterations_list.append(global_iter - 1 if global_iter > 0 else 0)
+
+    if save_model_tmpl and initial_mode == "init":
+        dest = resolve_save_model_path(save_model_tmpl, optimizer_dir)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        torch.save(model.state_dict(), dest)
 
     # --- Cleanup hooks and save outputs ---
     persistent_capture.remove()
@@ -306,7 +393,9 @@ def train_with_config(
             metric_arrays[k] = np.array(v)
         except (ValueError, TypeError):
             metric_arrays[k] = np.array(v, dtype=object)
-    metric_arrays["stage_names"] = np.array(stage_names_list, dtype=object)
-    metric_arrays["stage_end_checkpoint_idxs"] = np.array(stage_end_checkpoint_idxs, dtype=np.int64)
-    metric_arrays["stage_end_iterations"] = np.array(stage_end_iterations_list, dtype=np.int64)
+    metric_arrays["trial_names"] = np.array(trial_names_list, dtype=object)
+    metric_arrays["trial_end_checkpoint_idxs"] = np.array(trial_end_checkpoint_idxs, dtype=np.int64)
+    metric_arrays["trial_end_iterations"] = np.array(trial_end_iterations_list, dtype=np.int64)
     np.savez_compressed(str(optimizer_dir / "training_metrics.npz"), **metric_arrays)
+
+    compute_post_processing(model, returned_trials, units, optimizer_dir, device)

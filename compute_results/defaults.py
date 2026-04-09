@@ -14,5 +14,5 @@ DEFAULT_ADAM_EPS = 1e-8
 DEFAULT_ADAGRAD_EPS = 1e-10
 DEFAULT_SGD_MOMENTUM = 0.0
 DEFAULT_SHAMPOO_PRECONDITIONER_EPSILON = 1e-12
-DEFAULT_SHAMPOO_BETAS: tuple[float, float] = (0.9, 1.0) # Coefficients used for computing running averages of gradient and its square
+DEFAULT_SHAMPOO_BETAS: tuple[float, float] = (0.9, 0.999) # Coefficients used for computing running averages of gradient and its square
 DEFAULT_GRAFTING_EPS = 1e-10

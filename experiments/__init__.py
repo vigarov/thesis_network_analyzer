@@ -2,7 +2,7 @@
 
 from experiments.base import (
     Experiment,
-    StageSpec,
+    TrialSpec,
     get_experiment,
     list_experiments,
     register_experiment,

@@ -1,21 +1,21 @@
 """Experiment: Pre-train on 25 % base, then digitA, then digitB (within 75 % remaining).
 
 Uses the official MNIST train/test split:
-- Training stages draw from ``train=True`` filtered to the relevant digits.
+- Training trials draw from ``train=True`` filtered to the relevant digits.
 - Evaluation uses ``train=False`` filtered to the relevant digits.
 
 Within the train set, base_ratio (e.g.: 25 %) goes to a "base" subset that the model will be pre-trained on
  and the rest (e.g.: 75 %) to a "remaining" subset used for per-digit training.
 
-Stage A (pretrain): train on all digits in the base subset (shuffled).  [once_only=True]
-Stage B (digitA): train on digitA within the remaining subset.
-Stage C (digitB): train on digitB within the remaining subset.
+Trial A (pretrain): train on all digits in the base subset (shuffled).  [once_only=True]
+Trial B (digitA): train on digitA within the remaining subset.
+Trial C (digitB): train on digitB within the remaining subset.
 
-Trials / variability
---------------------
-- Empty variability: flat list; pretrain runs only in trial 0 via ``once_only=True``.
-- ``change_digits``: nested list of length ``num_trials``; trial 0 includes pretrain +
-  original digits; further trials shift the digit pairs like in digitA_then_digitB_75_25.py
+Experiment runs / variability
+-----------------------------
+- Empty variability: flat list; pretrain runs only in run 0 via ``once_only=True``.
+- ``change_digits``: nested list of length ``num_experiment_runs``; run 0 includes pretrain +
+  original digits; further runs shift the digit pairs like in digitA_then_digitB_75_25.py
 """
 
 from typing import Any
@@ -23,7 +23,7 @@ from typing import Any
 import torch
 from torch.utils.data import Subset
 
-from experiments.base import StageSpec, register_experiment
+from experiments.base import TrialSpec, register_experiment
 from experiments.mnist.base import MNISTWrapper, digit_indices, make_loader
 
 
@@ -57,7 +57,7 @@ def _split_base_remaining(
 
 @register_experiment
 class Pretrain25ThenDigitAThenDigitB_25_75(MNISTWrapper):
-    """Three-stage continual learning with a pre-training base."""
+    """Three-trial continual learning with a pre-training base."""
 
     def __init__(
         self,
@@ -77,21 +77,17 @@ class Pretrain25ThenDigitAThenDigitB_25_75(MNISTWrapper):
         return f"pretrain{pct}_then_{self.digitA}_then_{self.digitB}_25_75"
 
     def config_fields(self) -> dict[str, Any]:
-        return {
-            "digitA": self.digitA,
-            "digitB": self.digitB,
-            "base_ratio": self.base_ratio,
-        }
+        return {**super().config_fields(), "base_ratio": self.base_ratio}
 
-    def _digit_stages(
+    def _digit_trials(
         self,
-        pretrain_indices: list[int] | None, # None if no pretraining at that trial
+        pretrain_indices: list[int] | None, # None if no pretraining at that run
         remaining_indices_by_digit: dict[int, list[int]],
         digitA: int,
         digitB: int,
         batch_size: int,
-    ) -> tuple[StageSpec, ...]:
-        """Build digit stages B and C for a given pair; also returns pretrain stage if applicable."""
+    ) -> tuple[TrialSpec, ...]:
+        """Build digit trials B and C for a given pair; also returns pretrain trial if applicable."""
         
         both_digits_test = self._test_by_digit_indices[digitA] + self._test_by_digit_indices[digitB]
         eval_loaders = {
@@ -109,35 +105,35 @@ class Pretrain25ThenDigitAThenDigitB_25_75(MNISTWrapper):
         }
 
 
-        stage_b = StageSpec(
-            name=f"stageB_digit{digitA}",
-            train_loader=make_loader(self._train_ds, remaining_indices_by_digit[digitA], batch_size),
+        trial_b = TrialSpec(
+            name=f"trialB_digit{digitA}",
+            train_loader=make_loader(self._train_ds, remaining_indices_by_digit[digitA], batch_size, shuffle=False),
             eval_loaders=eval_loaders | extra_eval_loaders,
         )
-        stage_c = StageSpec(
-            name=f"stageC_digit{digitB}",
-            train_loader=make_loader(self._train_ds, remaining_indices_by_digit[digitB], batch_size),
+        trial_c = TrialSpec(
+            name=f"trialC_digit{digitB}",
+            train_loader=make_loader(self._train_ds, remaining_indices_by_digit[digitB], batch_size, shuffle=False),
             eval_loaders=eval_loaders | extra_eval_loaders,
         )
 
         if pretrain_indices is not None:
-            stage_a = StageSpec(
-                name="stageA_base_pretrain",
-                train_loader=make_loader(self._train_ds, pretrain_indices, batch_size=batch_size),
+            trial_a = TrialSpec(
+                name="trialA_base_pretrain",
+                train_loader=make_loader(self._train_ds, pretrain_indices, batch_size=batch_size, shuffle=True),
                 eval_loaders=eval_loaders,
                 once_only=True,
             )
-            return stage_a, stage_b, stage_c
-        return stage_b, stage_c
+            return trial_a, trial_b, trial_c
+        return trial_b, trial_c
 
-    def _build_stages(
-        self, batch_size: int, seed: int, *, num_trials: int
-    ) -> list[StageSpec] | list[list[StageSpec]]:
-        variability = self._trial_variability.strip().lower()
+    def _build_trials(
+        self, batch_size: int, seed: int, *, num_experiment_runs: int
+    ) -> list[TrialSpec] | list[list[TrialSpec]]:
+        variability = self._experiment_variability.strip().lower()
         if variability not in ("", "change_digits"):
             raise ValueError(
                 f"Pretrain25ThenDigitAThenDigitB_25_75 does not support "
-                f"trial_variability={self._trial_variability!r}. "
+                f"experiment_variability={self._experiment_variability!r}. "
                 "Supported values: '' (none), 'change_digits'."
             )
 
@@ -148,8 +144,8 @@ class Pretrain25ThenDigitAThenDigitB_25_75(MNISTWrapper):
             shuffle=True,
         )
 
-        # trial 0: pretrain + original digits
-        t0_pretrain, t0_digitA, t0_digitB = self._digit_stages(
+        # run 0: pretrain + original digits
+        t0_pretrain, t0_digitA, t0_digitB = self._digit_trials(
             sum(pretrain_indices_by_digit.values(), []), \
             remaining_indices_by_digit, \
             self.digitA, self.digitB, batch_size)
@@ -158,11 +154,11 @@ class Pretrain25ThenDigitAThenDigitB_25_75(MNISTWrapper):
         if variability == "":
             return t0_list
         else:
-            per_trial: list[list[StageSpec]] = [t0_list]
+            per_run: list[list[TrialSpec]] = [t0_list]
             if variability == "change_digits":
-                for t in range(num_trials-1):
-                    dA = (2*self.digitA + t) % self.N_DIGITS
-                    dB = (2*self.digitB + t) % self.N_DIGITS
-                    stage_b, stage_c = self._digit_stages(None,remaining_indices_by_digit, dA, dB, batch_size)
-                    per_trial.append([stage_b, stage_c])
-        return per_trial
+                for t in range(num_experiment_runs-1):
+                    dA = (self.digitA + 2*t) % self.N_DIGITS
+                    dB = (self.digitB + 2*t) % self.N_DIGITS
+                    trial_b, trial_c = self._digit_trials(None,remaining_indices_by_digit, dA, dB, batch_size)
+                    per_run.append([trial_b, trial_c])
+        return per_run

@@ -8,6 +8,8 @@ import re
 from pathlib import Path
 from typing import Any
 
+import torch
+
 # Keys omitted from the training fingerprint and from training-config equality checks.
 # ``framework_version`` is ignored if present in an old config.json on disk.
 FINGERPRINT_EXCLUDE_KEYS = frozenset(
@@ -15,6 +17,7 @@ FINGERPRINT_EXCLUDE_KEYS = frozenset(
         "internal_keep_tensors",
         "device",
         "save_model_cp",
+        "save_model",
         "force",
         "training_config_fingerprint",
         "framework_version",
@@ -47,6 +50,19 @@ def parse_checkpoint_cadence(cadence: str) -> tuple[str, int | None]:
     )
 
 
+def normalize_loss(loss: str) -> str:
+    """Map a user-facing loss name to a canonical key: ``ce`` or ``mse``."""
+    s = loss.strip().lower().replace("_", " ")
+    s = re.sub(r"\s+", " ", s)
+    if s in ("ce", "cross entropy", "crossentropy"):
+        return "ce"
+    if s == "mse":
+        return "mse"
+    raise ValueError(
+        f"Invalid loss: {loss!r}. Use 'ce', 'cross entropy', or 'mse'."
+    )
+
+
 # In JSON / CLI lists (e.g. ``model_class``, ``optimizer``), this token expands to
 # every name in the corresponding registry
 ALL_AVAILABLE_SELECTION = "all"
@@ -74,6 +90,59 @@ def expand_registry_selection(
     avail_set = set(available)
     merged = set(explicit) | avail_set
     return sorted(merged)
+
+
+def _apply_previous_training_config_defaults(stored: dict[str, Any]) -> None:
+    """Fill missing keys so older config.json matches new default fingerprint fields.
+    Needed because the config changes over time -> do not require re-training for functionnally equivalent configs."""
+    stored.setdefault("save_model_cp", False)
+    stored.setdefault("use_initial_model", "")
+    stored.setdefault("initial_model_mode", "init")
+    stored.setdefault("initial_model_sha256", "")
+
+
+def normalize_initial_model_mode(mode: str) -> str:
+    """Return ``init`` or ``pretrain``."""
+    m = mode.strip().lower()
+    if m in ("init", "pretrain"):
+        return m
+    raise ValueError(
+        f"initial_model_mode must be 'init' or 'pretrain', got {mode!r}."
+    )
+
+
+def _resolve_initial_model_path(path_str: str) -> Path:
+    raw = path_str.strip()
+    if not raw:
+        raise ValueError("use_initial_model path is empty.")
+    path = Path(raw)
+    if not path.is_absolute():
+        path = Path.cwd() / path
+    path = path.resolve()
+    if not path.is_file():
+        raise ValueError(f"use_initial_model path is not a file: {path}")
+    if path.suffix.lower() != ".pth":
+        raise ValueError(
+            f"use_initial_model must point to a .pth file, got suffix {path.suffix!r}."
+        )
+    return path
+
+
+def validate_initial_model_path(path_str: str) -> str:
+    """Verify *path_str* (relative to cwd) is a readable ``.pth``; return SHA-256 hex of file bytes.
+
+    Expects a ``torch.save(model.state_dict(), ...)`` file (``torch>=2.6``, ``weights_only=True``).
+    """
+    path = _resolve_initial_model_path(path_str)
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    torch.load(path, map_location="cpu", weights_only=True)
+    return digest
+
+
+def load_initial_model_state_dict(path_str: str) -> dict[str, Any]:
+    """Load ``state_dict`` from *path_str* (relative to cwd if not absolute)."""
+    path = _resolve_initial_model_path(path_str)
+    return torch.load(path, map_location="cpu", weights_only=True)
 
 
 def fingerprint_payload(config: dict[str, Any]) -> dict[str, Any]:
@@ -107,7 +176,7 @@ def result_id_for_config(
         if not config_path.exists():
             return rid
         stored = dict(json.loads(config_path.read_text()))
-        stored.setdefault("save_model_cp", False)
+        _apply_previous_training_config_defaults(stored)
         if fingerprint_payload(config) == fingerprint_payload(stored):
             return rid
     raise ConfigConflictError(
@@ -122,7 +191,7 @@ def build_training_config(
     experiment_config: dict[str, Any],
     model_class: str,
     model_config: dict[str, Any],
-    stage_epochs: int = 1,
+    trial_epochs: int = 1,
     base_lr: float = 1e-3,
     batch_size: int = 1,
     seed: int = 3003,
@@ -132,18 +201,30 @@ def build_training_config(
     he_init: int | str | float = 3,
     init_epsilon: float = 1e-10,
     internal_keep_tensors: bool = False,
-    trials: int = 3,
-    trial_variability: str = "",
+    experiment_runs: int = 3,
+    experiment_variability: str = "",
+    loss: str = "ce",
+    use_initial_model: str = "",
+    initial_model_mode: str = "init",
+    save_model: str = "",
 ) -> dict[str, Any]:
     parse_checkpoint_cadence(checkpoint_cadence)
-    if trials < 1:
-        raise ValueError(f"trials must be a positive integer, got {trials}")
+    if experiment_runs < 1:
+        raise ValueError(f"experiment_runs must be a positive integer, got {experiment_runs}")
+    loss_key = normalize_loss(loss)
+    mode_key = normalize_initial_model_mode(initial_model_mode)
+    path_for_io = str(use_initial_model).strip()
+    if mode_key == "pretrain" and not path_for_io:
+        raise ValueError("initial_model_mode 'pretrain' requires a non-empty use_initial_model path.")
+    sha = ""
+    if path_for_io:
+        sha = validate_initial_model_path(path_for_io)
     config: dict[str, Any] = {
         "experiment_class": experiment_class,
         "experiment_config": experiment_config,
         "model_class": model_class,
         "model_config": model_config,
-        "stage_epochs": stage_epochs,
+        "trial_epochs": trial_epochs,
         "base_lr": base_lr,
         "batch_size": batch_size,
         "seed": seed,
@@ -153,8 +234,13 @@ def build_training_config(
         "he_init": he_init,
         "init_epsilon": init_epsilon,
         "internal_keep_tensors": internal_keep_tensors,
-        "trials": trials,
-        "trial_variability": trial_variability,
+        "experiment_runs": experiment_runs,
+        "experiment_variability": experiment_variability,
+        "loss": loss_key,
+        "use_initial_model": use_initial_model,
+        "initial_model_mode": mode_key,
+        "initial_model_sha256": sha,
+        "save_model": str(save_model).strip(),
     }
     config["training_config_fingerprint"] = compute_fingerprint(config)
     return config
@@ -190,7 +276,7 @@ def guard_training_config(results_dir: Path, config: dict[str, Any]) -> None:
         return
 
     stored = dict(json.loads(config_path.read_text()))
-    stored.setdefault("save_model_cp", False)
+    _apply_previous_training_config_defaults(stored)
     if fingerprint_payload(config) == fingerprint_payload(stored):
         return
 

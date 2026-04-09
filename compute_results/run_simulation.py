@@ -29,7 +29,8 @@ With explicit arguments::
         --digitA 1 --digitB 2 \
         --model DNN5Hidden64 \
         --optimizer sgd \
-        --stage-epochs 1 --base-lr 1e-3 --batch-size 1 --seed 3003
+        --loss ce \
+        --trial-epochs 1 --base-lr 1e-3 --batch-size 1 --seed 3003
 
 Multiple optimizers/models/experiments (CSV lists)::
 
@@ -59,6 +60,8 @@ from compute_results.config_guard import (
     guard_optimizer_config,
     guard_training_config,
     load_existing_optimizer_ids,
+    load_initial_model_state_dict,
+    normalize_loss,
     optimizer_has_results,
     result_id_for_config,
     save_config,
@@ -171,12 +174,17 @@ def _run_single_task(
     extractor = get_extractor(t.optimizer_class, **t.optimizer_kwargs)
 
     torch.manual_seed(t.seed)
-    apply_model_weight_init(
-        model,
-        he_init=t.config["he_init"],
-        init_epsilon=float(t.config["init_epsilon"]),
-        activation=t.config.get("activation", "relu"),
-    )
+    init_path = str(t.config.get("use_initial_model", "") or "").strip()
+    if init_path:
+        state = load_initial_model_state_dict(init_path)
+        model.load_state_dict(state, strict=True)
+    else:
+        apply_model_weight_init(
+            model,
+            he_init=t.config["he_init"],
+            init_epsilon=float(t.config["init_epsilon"]),
+            activation=t.config.get("activation", "relu"),
+        )
 
     num_gpus = torch.cuda.device_count()
     if num_gpus > 0:
@@ -236,16 +244,34 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--digitA", type=int, default=1)
     p.add_argument("--digitB", type=int, default=2)
     p.add_argument(
+        "--samples-per-digit",
+        type=int,
+        default=None,
+        metavar="S",
+        help=(
+            "Use at most S training samples per digit (MNIST train order, after eval "
+            "holdout). Omit to use all available samples per digit."
+        ),
+    )
+    p.add_argument(
         "--base-ratio",
         type=float,
         default=0.25,
         help="Pretrain base subset ratio (0-1). Used by Pretrain25ThenDigitAThenDigitB_25_75.",
     )
-    p.add_argument("--stage-epochs", type=int, default=1)
+    p.add_argument("--trial-epochs", type=int, default=1)
     p.add_argument("--base-lr", type=float, default=1e-3)
     p.add_argument("--batch-size", type=int, default=1)
     p.add_argument("--seed", type=int, default=3003)
     p.add_argument("--activation", default="relu")
+    p.add_argument(
+        "--loss",
+        default="ce",
+        help=(
+            "Training loss: 'ce' / 'cross entropy' (CrossEntropyLoss), or 'mse' "
+            "(softmax(logits) vs one-hot targets, mean squared error)."
+        ),
+    )
     p.add_argument(
         "--he-init",
         type=str,
@@ -270,6 +296,36 @@ def _parse_args() -> argparse.Namespace:
         help="Write model state_dict to checkpoints/<tag>.pt at each checkpoint.",
     )
     p.add_argument(
+        "--use-initial-model",
+        default=None,
+        metavar="PATH",
+        help=(
+            "Load initial weights from this .pth path (relative to cwd if not absolute) as saved by --save-model"
+            "Omit to use He/Gaussian init. When using --config, overrides JSON if set."
+        ),
+    )
+    p.add_argument(
+        "--initial-model-mode",
+        default=None,
+        choices=["init", "pretrain"],
+        help=(
+            "'init': load weights then run all training trials. 'pretrain': weights are post-pretrain; "
+            "skip leading once_only trials on experiment run 0. Requires --use-initial-model / JSON path "
+            "when set to pretrain."
+        ),
+    )
+    p.add_argument(
+        "--save-model",
+        nargs="?",
+        const="!OPT/model.pth",
+        default=None,
+        metavar="PATH",
+        help=(
+            "Save model state_dict once per optimizer run; excluded from training fingerprint. "
+            "Use flag alone for !OPT/model.pth. !OPT expands to the optimizer results directory."
+        ),
+    )
+    p.add_argument(
         "--shampoo-preconditioner-epsilon",
         type=float,
         default=None,
@@ -286,18 +342,18 @@ def _parse_args() -> argparse.Namespace:
         help="Keep checkpoint activations as GPU tensors; flush to numpy only when >6 GB.",
     )
     p.add_argument(
-        "--trials",
+        "--experiment-runs",
         type=int,
         default=3,
-        help="Number of trials (full stage-sequence repetitions). Default: 3.",
+        help="Number of experiment runs (full trial-sequence repetitions). Default: 3.",
     )
     p.add_argument(
-        "--trial-variability",
+        "--experiment-variability",
         type=str,
         default="",
         metavar="VARIABILITY_TYPE",
         help=(
-            "Variability applied between trials, interpreted per experiment. "
+            "Variability between experiment runs, interpreted per experiment. "
             "Supported: 'change_digits' (shift digit labels by +2 mod n_digits//2). "
             "Default: '' (no change)."
         ),
@@ -323,7 +379,15 @@ def main() -> int:
     if args.config is not None:
         raw = json.loads(args.config.read_text())
         experiment_classes = _parse_csv(raw["experiment_class"])
-        experiment_kwargs = raw.get("experiment_config", {})
+        experiment_kwargs = dict(raw.get("experiment_config", {}))
+        if (
+            "num_trial_samples" not in experiment_kwargs
+            and "num_stage_samples" in experiment_kwargs
+        ):
+            experiment_kwargs["num_trial_samples"] = experiment_kwargs["num_stage_samples"]
+        spd = raw.get("samples_per_digit")
+        if spd is not None:
+            experiment_kwargs["samples_per_digit"] = int(spd)
         model_classes = _parse_csv(raw["model_class"])
         model_kwargs = raw.get("model_config", {})
         if not model_kwargs:
@@ -332,7 +396,9 @@ def main() -> int:
             model_kwargs["activation"] = raw.get("activation", "relu")
         optimizer_names = _parse_csv(raw["optimizer"])
         base_lr = raw.get("base_lr", 1e-3)
-        stage_epochs = raw.get("stage_epochs", 1)
+        trial_epochs = int(
+            raw.get("trial_epochs", raw.get("stage_epochs", args.trial_epochs))
+        )
         batch_size = raw.get("batch_size", 1)
         seed = raw.get("seed", 3003)
         activation = raw.get("activation", "relu")
@@ -341,9 +407,22 @@ def main() -> int:
         he_init = raw.get("he_init", 3)
         init_epsilon = float(raw.get("init_epsilon", 1e-10))
         internal_keep_tensors = bool(raw.get("internal_keep_tensors", False)) or args.internal_keep_tensors
-        trials = int(raw.get("trials", args.trials))
-        trial_variability = str(raw.get("trial_variability", args.trial_variability))
+        experiment_runs = int(
+            raw.get("experiment_runs", raw.get("trials", args.experiment_runs))
+        )
+        experiment_variability = str(
+            raw.get(
+                "experiment_variability",
+                raw.get("trial_variability", args.experiment_variability),
+            )
+        )
+        loss = str(raw.get("loss", args.loss))
         force = raw.get("force", False) or args.force
+        use_initial_model = str(raw.get("use_initial_model", "") or "")
+        initial_model_mode = str(raw.get("initial_model_mode", "init") or "init")
+        save_model = str(raw.get("save_model", "") or "")
+        if args.samples_per_digit is not None:
+            experiment_kwargs["samples_per_digit"] = args.samples_per_digit
     else:
         if not (args.experiment and args.model and args.optimizer):
             print(
@@ -357,11 +436,13 @@ def main() -> int:
             "digitB": args.digitB,
             "base_ratio": args.base_ratio,
         }
+        if args.samples_per_digit is not None:
+            experiment_kwargs["samples_per_digit"] = args.samples_per_digit
         model_classes = _parse_csv(args.model)
         model_kwargs = {"activation": args.activation}
         optimizer_names = _parse_csv(args.optimizer)
         base_lr = args.base_lr
-        stage_epochs = args.stage_epochs
+        trial_epochs = args.trial_epochs
         batch_size = args.batch_size
         seed = args.seed
         activation = args.activation
@@ -370,10 +451,21 @@ def main() -> int:
         he_init = args.he_init
         init_epsilon = args.init_epsilon
         internal_keep_tensors = args.internal_keep_tensors
-        trials = args.trials
-        trial_variability = args.trial_variability
+        experiment_runs = args.experiment_runs
+        experiment_variability = args.experiment_variability
+        loss = args.loss
         force = args.force
+        use_initial_model = ""
+        initial_model_mode = "init"
+        save_model = ""
         raw = {}  # no JSON; CLI-only path
+
+    if args.use_initial_model is not None:
+        use_initial_model = args.use_initial_model
+    if args.initial_model_mode is not None:
+        initial_model_mode = args.initial_model_mode
+    if args.save_model is not None:
+        save_model = args.save_model
 
     opt_extra_kwargs: dict = {}
     eps_from_json = raw.get(SHAMPOO_PRECONDITIONER_EPSILON_KEY)
@@ -403,6 +495,18 @@ def main() -> int:
     if init_epsilon < 0:
         print("ERROR: init_epsilon must be non-negative.", file=sys.stderr)
         sys.exit(1)
+    try:
+        normalize_loss(loss)
+    except ValueError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        sys.exit(1)
+    spd = experiment_kwargs.get("samples_per_digit")
+    if spd is not None and spd < 1:
+        print(
+            "ERROR: samples_per_digit must be >= 1 when set.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
     _validate_names(experiment_classes, model_classes, optimizer_names)
 
@@ -423,7 +527,7 @@ def main() -> int:
             experiment_config=exp_kw,
             model_class=mod_cls,
             model_config=mod_kw,
-            stage_epochs=stage_epochs,
+            trial_epochs=trial_epochs,
             base_lr=base_lr,
             batch_size=batch_size,
             seed=seed,
@@ -433,8 +537,12 @@ def main() -> int:
             he_init=he_init,
             init_epsilon=init_epsilon,
             internal_keep_tensors=internal_keep_tensors,
-            trials=trials,
-            trial_variability=trial_variability,
+            experiment_runs=experiment_runs,
+            experiment_variability=experiment_variability,
+            loss=loss,
+            use_initial_model=use_initial_model,
+            initial_model_mode=initial_model_mode,
+            save_model=save_model,
         )
         exp_dir = RESULTS_ROOT / experiment.experiment_id()
         rid = result_id_for_config(

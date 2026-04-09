@@ -9,16 +9,17 @@
         "activation": "relu"
     },
     "optimizer": "all",
-    "stage_epochs": 1,
-    "base_lr": 0.001,
-    "batch_size": 4,
+    "trial_epochs": 1,
+    "base_lr": 0.01,
+    "batch_size": 1,
     "seed": 3003,
     "activation": "relu",
     "he_init": "all",
     "init_epsilon": 1e-8,
-    "checkpoint_cadence": "30 its",
+    "checkpoint_cadence": "1 its",
     "device": "cuda",
     "internal_keep_tensors": true,
-    "trials": 3,
-    "trial_variability": "change_digits"
+    "experiment_runs": 2,
+    "experiment_variability": "change_digits",
+    "samples_per_digit": 100
 }

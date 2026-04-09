@@ -6,10 +6,11 @@ Provides:
 - A common ``evaluation_inputs`` implementation.
 
 Subclasses only need to implement ``experiment_id``, ``config_fields``,
-and ``_build_stages``.
+and ``_build_trials``.
 """
 from typing import Any
 
+import numpy as np
 import torch
 from torch.utils.data import DataLoader, Subset, TensorDataset
 from torchvision import datasets, transforms
@@ -47,6 +48,21 @@ def make_loader(
     )
 
 
+def train_indices_first_k_per_digit(
+    train_indices: list[int],
+    labels_source: datasets.MNIST,
+    *,
+    k: int,
+    n_digits: int = 10,
+) -> list[int]:
+    if k < 1:
+        raise ValueError(f"k must be >= 1, got {k}")
+    idx = np.asarray(train_indices, dtype=np.intp)
+    labels = labels_source.targets[idx].numpy()
+    first_k_indices_all_digits = np.concatenate([np.flatnonzero(labels == d)[:k] for d in range(n_digits)])
+    return idx[first_k_indices_all_digits].tolist()
+
+
 class MNISTWrapper(Experiment):
     """Shared base for MNIST digit-continual experiments.
 
@@ -57,10 +73,22 @@ class MNISTWrapper(Experiment):
     #: Number of digit classes in MNIST (0--9).
     N_DIGITS: int = 10
 
-    def __init__(self, digitA: int = 0, digitB: int = 1, **kwargs):
+    def __init__(
+        self,
+        digitA: int = 0,
+        digitB: int = 1,
+        *,
+        samples_per_digit: int | None = None,
+        **kwargs,
+    ):
         super().__init__()
         self.digitA = digitA
         self.digitB = digitB
+        if samples_per_digit is not None and samples_per_digit < 1:
+            raise ValueError(
+                f"samples_per_digit must be >= 1 when set, got {samples_per_digit}"
+            )
+        self.samples_per_digit = samples_per_digit
         self._ensure_datasets()
         self._test_by_digit_indices = digit_indices(self._test_ds, tuple(range(self.N_DIGITS)))
         self._eval_pinned_device: torch.device | None = None
@@ -69,6 +97,12 @@ class MNISTWrapper(Experiment):
     def first_digits(self) -> tuple[int, ...]:
         """Digits this experiment operates on (override for >2 digits)."""
         return (self.digitA, self.digitB)
+
+    def config_fields(self) -> dict[str, Any]:
+        fields: dict[str, Any] = {"digitA": self.digitA, "digitB": self.digitB}
+        if self.samples_per_digit is not None:
+            fields["samples_per_digit"] = self.samples_per_digit
+        return fields
 
     def _ensure_datasets(self):
         """Load MNIST train/test sets, normalizing both with train-set stats."""
@@ -104,6 +138,13 @@ class MNISTWrapper(Experiment):
 
         # Train dataset excludes eval samples
         train_indices = [i for i in range(len(full_train)) if i not in eval_indices_set]
+        if self.samples_per_digit is not None:
+            train_indices = train_indices_first_k_per_digit(
+                train_indices,
+                full_train,
+                k=self.samples_per_digit,
+                n_digits=self.N_DIGITS,
+            )
         self._train_ds = Subset(full_train, train_indices)
 
     
