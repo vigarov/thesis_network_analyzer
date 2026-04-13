@@ -12,8 +12,8 @@ experiments/base.py
 experiments/mnist/__init__.py
 experiments/mnist/base.py
 experiments/mnist/digitA_then_digitB_75_25.py
-experiments/mnist/pretrain25_then_digitA_then_digitB_25_75_inside_train.py
-experiments/mnist/pretrain_relabel_c.py
+experiments/mnist/pretrain_base_then_a_25_75_inside_train.py
+experiments/mnist/pretrain_a_mislabel_b_then_b.py
 models/__init__.py
 models/base.py
 models/cnn_3conv_k5_out32_then_fc32.py

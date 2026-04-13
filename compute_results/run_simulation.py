@@ -257,7 +257,7 @@ def _parse_args() -> argparse.Namespace:
         "--base-ratio",
         type=float,
         default=0.25,
-        help="Pretrain base subset ratio (0-1). Used by Pretrain25ThenDigitAThenDigitB_25_75.",
+        help="Pretrain base subset ratio (0-1). Used by PretrainBase_thenDigitA.",
     )
     p.add_argument("--trial-epochs", type=int, default=1)
     p.add_argument("--base-lr", type=float, default=1e-3)

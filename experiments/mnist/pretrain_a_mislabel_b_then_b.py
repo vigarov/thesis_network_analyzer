@@ -1,18 +1,19 @@
-"""Experiment: Pretrain on all digits (first K per digit), then digitA, digitB, digitC with C relabeled as B.
+"""Experiment: Pretrain on all digits (first K per digit), then a self-contained adjacent-digit schedule.
 
-Train pool: official MNIST train minus pinned eval samples (``MNISTWrapper``), no global ``samples_per_digit`` cap.
+Train pool: official MNIST train minus pinned eval samples (``MNISTWrapper``), no global
+``samples_per_digit`` cap.
 
-- **Pretrain** (``once_only=True``): first ``num_pretrain_samples`` indices per digit for digits 0--9, concatenated, shuffled.
-- **digitA / digitB**: first ``num_trial_samples`` from each digit's remainder after the pretrain prefix.
-- **digitC**: same images as digitC remainder, but training targets are ``digitB`` (mislabeling).
+- **Pretrain** (``once_only=True``): first ``num_pretrain_samples`` indices per digit for
+  digits 0--9, concatenated, shuffled.
+- **Trial 1:** first ``num_trial_samples`` from remainder of digit ``a`` (correct label ``a``).
+- **Trial 2:** same images as trial 1, training targets are ``b = (a + 1) % 10``.
+- **Trial 3:** first ``num_trial_samples`` from remainder of digit ``b`` (correct label ``b``).
 
-Evaluation loaders use true test labels. Only the digitC *training* trial uses replaced labels.
+Evaluation loaders use true test labels. Only the mislabel trial uses replaced targets.
 
-``experiment_variability``: ``""`` (flat list) or ``change_digits`` (run 0 includes pretrain with configured
-``digitA`` / ``digitB`` / ``digitC``; each later run omits pretrain and sets
-``digitA <- (digitC + 2t) % 10``, ``digitB <- (digitC + 2t + 1) % 10``,
-``digitC <- (digitC + 2t + 2) % 10`` (images of the new C, labels of the new B), for
-``t = 0 .. num_experiment_runs-2`` in the follow-up runs).
+``experiment_variability``: ``""`` (flat list) or ``change_digits`` (run 0 includes pretrain with
+configured anchor ``digitA``; later runs omit pretrain and use anchor
+``(digitA + 2 * (t + 1)) % 10`` for ``t = 0 .. num_experiment_runs - 2``).
 """
 
 from typing import Any
@@ -69,82 +70,71 @@ def _pretrain_and_remainder(
 
 
 @register_experiment
-class PretrainRelabelC(MNISTWrapper):
-    """Pretrain on all digits, then A, B, C with C trained as label B."""
+class PretrainThenDigitAThenMislabelAsBThenDigitB(MNISTWrapper):
+    """Pretrain, then *a* correct, same images mislabeled as *b*, then *b* correct (*b*=*a*+1 mod 10)."""
 
     def __init__(
         self,
         digitA: int = 0,
-        digitB: int = 1,
-        digitC: int = 2,
         num_pretrain_samples: int = 500,
         num_trial_samples: int = 100,
         **kwargs: Any,
     ) -> None:
-        if digitA == digitB or digitA == digitC or digitB == digitC:
-            raise ValueError(
-                f"digitA, digitB, digitC must be pairwise distinct; got "
-                f"{digitA}, {digitB}, {digitC}"
-            )
+        if not 0 <= digitA < self.N_DIGITS:
+            raise ValueError(f"digitA must be in [0, {self.N_DIGITS}), got {digitA}")
         if num_pretrain_samples < 1:
             raise ValueError(f"num_pretrain_samples must be >= 1, got {num_pretrain_samples}")
         if num_trial_samples < 1:
             raise ValueError(f"num_trial_samples must be >= 1, got {num_trial_samples}")
-        super().__init__(digitA=digitA, digitB=digitB, samples_per_digit=None, **kwargs)
-        self.digitC = digitC
+        digit_b = (digitA + 1) % self.N_DIGITS
+        super().__init__(digitA=digitA, digitB=digit_b, samples_per_digit=None, **kwargs)
         self.num_pretrain_samples = num_pretrain_samples
         self.num_trial_samples = num_trial_samples
 
     @property
     def first_digits(self) -> tuple[int, ...]:
-        return (self.digitA, self.digitB, self.digitC)
+        return (self.digitA, (self.digitA + 1) % self.N_DIGITS)
 
     def experiment_id(self) -> str:
+        b = (self.digitA + 1) % self.N_DIGITS
         return (
-            f"pretrain_relabelC_{self.digitA}_{self.digitB}_{self.digitC}_"
+            f"pretrain_{self.digitA}_mislabel{b}_{b}_"
             f"pt{self.num_pretrain_samples}_tr{self.num_trial_samples}"
         )
 
     def config_fields(self) -> dict[str, Any]:
-        return {
-            **super().config_fields(),
-            "digitC": self.digitC,
+        fields: dict[str, Any] = {
+            "digitA": self.digitA,
             "num_pretrain_samples": self.num_pretrain_samples,
             "num_trial_samples": self.num_trial_samples,
         }
+        if self.samples_per_digit is not None:
+            fields["samples_per_digit"] = self.samples_per_digit
+        return fields
 
-    def _eval_loaders_for_digits(
+    def _eval_loaders_for_pair(
         self,
-        digitA: int,
-        digitB: int,
-        digitC: int,
+        digit_a: int,
+        digit_b: int,
     ) -> dict[str, DataLoader]:
         all_test_idx = sum(self._test_by_digit_indices.values(), [])
-        abc_test = (
-            self._test_by_digit_indices[digitA]
-            + self._test_by_digit_indices[digitB]
-            + self._test_by_digit_indices[digitC]
+        ab_test = (
+            self._test_by_digit_indices[digit_a] + self._test_by_digit_indices[digit_b]
         )
         return {
             "all_test": make_loader(
                 self._test_ds, all_test_idx, batch_size=256, shuffle=False
             ),
-            "abc_test": make_loader(self._test_ds, abc_test, batch_size=256, shuffle=False),
-            f"digitA_{digitA}_test": make_loader(
+            "ab_test": make_loader(self._test_ds, ab_test, batch_size=256, shuffle=False),
+            f"digitA_{digit_a}_test": make_loader(
                 self._test_ds,
-                self._test_by_digit_indices[digitA],
+                self._test_by_digit_indices[digit_a],
                 batch_size=256,
                 shuffle=False,
             ),
-            f"digitB_{digitB}_test": make_loader(
+            f"digitB_{digit_b}_test": make_loader(
                 self._test_ds,
-                self._test_by_digit_indices[digitB],
-                batch_size=256,
-                shuffle=False,
-            ),
-            f"digitC_{digitC}_test": make_loader(
-                self._test_ds,
-                self._test_by_digit_indices[digitC],
+                self._test_by_digit_indices[digit_b],
                 batch_size=256,
                 shuffle=False,
             ),
@@ -154,18 +144,13 @@ class PretrainRelabelC(MNISTWrapper):
         self,
         pretrain_indices: list[int] | None,
         remaining_by_digit: dict[int, list[int]],
-        digitA: int,
-        digitB: int,
-        digitC: int,
+        digit_a: int,
         batch_size: int,
     ) -> tuple[TrialSpec, ...]:
-        eval_loaders = self._eval_loaders_for_digits(digitA, digitB, digitC)
+        digit_b = (digit_a + 1) % self.N_DIGITS
+        eval_loaders = self._eval_loaders_for_pair(digit_a, digit_b)
 
-        for d, name in (
-            (digitA, "digitA"),
-            (digitB, "digitB"),
-            (digitC, "digitC"),
-        ):
+        for d, name in ((digit_a, "digit_a"), (digit_b, "digit_b")):
             rem = remaining_by_digit[d]
             if len(rem) < self.num_trial_samples:
                 raise ValueError(
@@ -173,33 +158,32 @@ class PretrainRelabelC(MNISTWrapper):
                     f"need {self.num_trial_samples}, got {len(rem)}"
                 )
 
-        idx_a = remaining_by_digit[digitA][: self.num_trial_samples]
-        idx_b = remaining_by_digit[digitB][: self.num_trial_samples]
-        idx_c = remaining_by_digit[digitC][: self.num_trial_samples]
+        idx_a = remaining_by_digit[digit_a][: self.num_trial_samples]
+        idx_b = remaining_by_digit[digit_b][: self.num_trial_samples]
 
-        trial_a = TrialSpec(
-            name=f"trial_digit{digitA}",
+        trial_a_correct = TrialSpec(
+            name=f"trial_digit{digit_a}",
             train_loader=make_loader(
                 self._train_ds, idx_a, batch_size, shuffle=False
             ),
             eval_loaders=eval_loaders,
         )
-        trial_b = TrialSpec(
-            name=f"trial_digit{digitB}",
-            train_loader=make_loader(
-                self._train_ds, idx_b, batch_size, shuffle=False
-            ),
-            eval_loaders=eval_loaders,
-        )
-        relabel_ds = _RelabelSubset(self._train_ds, idx_c, digitB)
-        train_c = DataLoader(
+        relabel_ds = _RelabelSubset(self._train_ds, idx_a, digit_b)
+        train_mis = DataLoader(
             relabel_ds,
             batch_size=batch_size,
             shuffle=False,
         )
-        trial_c = TrialSpec(
-            name=f"trial_digit{digitC}_as_label{digitB}",
-            train_loader=train_c,
+        trial_a_mislabel = TrialSpec(
+            name=f"trial_digit{digit_a}_as_label{digit_b}",
+            train_loader=train_mis,
+            eval_loaders=eval_loaders,
+        )
+        trial_b_correct = TrialSpec(
+            name=f"trial_digit{digit_b}",
+            train_loader=make_loader(
+                self._train_ds, idx_b, batch_size, shuffle=False
+            ),
             eval_loaders=eval_loaders,
         )
 
@@ -215,8 +199,8 @@ class PretrainRelabelC(MNISTWrapper):
                 eval_loaders=eval_loaders,
                 once_only=True,
             )
-            return trial_pre, trial_a, trial_b, trial_c
-        return trial_a, trial_b, trial_c
+            return trial_pre, trial_a_correct, trial_a_mislabel, trial_b_correct
+        return trial_a_correct, trial_a_mislabel, trial_b_correct
 
     def _build_trials(
         self, batch_size: int, seed: int, *, num_experiment_runs: int
@@ -224,8 +208,9 @@ class PretrainRelabelC(MNISTWrapper):
         variability = self._experiment_variability.strip().lower()
         if variability not in ("", "change_digits"):
             raise ValueError(
-                f"PretrainRelabelC does not support experiment_variability="
-                f"{self._experiment_variability!r}. Supported: '', 'change_digits'."
+                f"PretrainThenDigitAThenMislabelAsBThenDigitB does not support "
+                f"experiment_variability={self._experiment_variability!r}. "
+                "Supported: '', 'change_digits'."
             )
 
         indices_by_digit = digit_indices(
@@ -235,28 +220,22 @@ class PretrainRelabelC(MNISTWrapper):
             indices_by_digit, self.num_pretrain_samples
         )
 
-        s_pre, s_a, s_b, s_c = self._digit_trials(
+        s_pre, s_a, s_mis, s_b = self._digit_trials(
             pretrain_flat,
             remaining_by_digit,
             self.digitA,
-            self.digitB,
-            self.digitC,
             batch_size,
         )
-        t0_list = [s_pre, s_a, s_b, s_c]
+        t0_list = [s_pre, s_a, s_mis, s_b]
 
         if variability == "":
             return t0_list
 
         per_run: list[list[TrialSpec]] = [t0_list]
-        c0 = self.digitC
         for t in range(num_experiment_runs - 1):
-            # After run 0: A<-C, B<-C+1, C<-C+2 (C mislabeled as B); each further run shifts by +2 on the chain.
-            d_a = (c0 + 2 * t) % self.N_DIGITS
-            d_b = (c0 + 2 * t + 1) % self.N_DIGITS
-            d_c = (c0 + 2 * t + 2) % self.N_DIGITS
+            anchor = (self.digitA + 2 * (t + 1)) % self.N_DIGITS
             trials = self._digit_trials(
-                None, remaining_by_digit, d_a, d_b, d_c, batch_size
+                None, remaining_by_digit, anchor, batch_size
             )
             per_run.append(list(trials))
         return per_run

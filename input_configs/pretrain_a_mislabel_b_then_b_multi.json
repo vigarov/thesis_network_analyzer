@@ -1,9 +1,9 @@
 {
-    "experiment_class": "Pretrain25ThenDigitAThenDigitB_25_75",
+    "experiment_class": "PretrainThenDigitAThenMislabelAsBThenDigitB",
     "experiment_config": {
         "digitA": 0,
-        "digitB": 1,
-        "base_ratio": 0.75
+        "num_pretrain_samples": 300,
+        "num_trial_samples": 100
     },
     "model_class": "DNN5Hidden64",
     "model_config": {
@@ -20,7 +20,8 @@
     "checkpoint_cadence": "1 its",
     "device": "cuda",
     "internal_keep_tensors": true,
-    "experiment_runs": 2,
+    "experiment_runs": 10,
     "experiment_variability": "change_digits",
-    "samples_per_digit": 400
+    "use_initial_model": "results_pretrain/pretrain_relabelC_0_1_2_pt300_tr100/065470/dnn_5x64/optimizers/grafted_shampoo_lr0.01/model.pth",
+    "initial_model_mode": "pretrain"
 }
