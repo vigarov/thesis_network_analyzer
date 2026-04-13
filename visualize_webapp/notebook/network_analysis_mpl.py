@@ -14,8 +14,12 @@ from matplotlib.transforms import blended_transform_factory
 
 from visualize_webapp.app import (
     C,
+    _activation_sample_matrix,
     _DIGIT_COLORS,
+    _NETWORK_EVAL_K_LINE_COLORS,
+    _NETWORK_EXPECTED_BATCH,
     _NETWORK_N_DIGITS,
+    _NETWORK_SAMPLES_PER_DIGIT,
     _compact_neuron_label,
     _trial_boundaries_from_metrics,
     compute_recovery_cumsum_by_layer,
@@ -63,7 +67,7 @@ def _x_values_for_checkpoints(
     return xs, use_iter, x_mode
 
 
-def add_trial_boundaries_mpl(ax: mpl.axes.Axes, metrics: dict[str, np.ndarray], x_mode: str) -> None:
+def add_trial_boundaries_mpl(ax: mpl.axes.Axes, metrics: dict[str, np.ndarray], x_mode: str, *, min_idx: int = 0) -> None:
     """Vertical dotted lines and trial labels (matches Plotly _add_trial_boundaries for a single axes)."""
     sb = _trial_boundaries_from_metrics(metrics, x_mode)
     if sb is None:
@@ -72,7 +76,7 @@ def add_trial_boundaries_mpl(ax: mpl.axes.Axes, metrics: dict[str, np.ndarray], 
     if not boundary_xs:
         return
 
-    for x in boundary_xs:
+    for x in boundary_xs[min_idx:]:
         ax.axvline(x, color="#000000", linestyle=":", linewidth=1.5, zorder=1)
 
     # Use *trial_names* from sb (already normalized). Do not use
@@ -95,6 +99,8 @@ def add_trial_boundaries_mpl(ax: mpl.axes.Axes, metrics: dict[str, np.ndarray], 
             start = 0.0 if i == 0 else float(int(cp_idxs[i - 1]) + 1)
             end = float(int(cp_idxs[i]))
         mid = (start + end) / 2.0
+        if mid < min_idx:
+            continue
         short = (
             name.replace("stage", "")
             .replace("trial", "")
@@ -125,6 +131,294 @@ def _apply_figure_style(fig: Figure) -> None:
         ax.tick_params(colors=C["fg"])
         for spine in ax.spines.values():
             spine.set_color(C["border"])
+
+
+def _eval_act_x_aligned(
+    neuron_id: str,
+    nts: dict[str, np.ndarray],
+    metrics: dict[str, np.ndarray],
+) -> tuple[np.ndarray, list[float], str] | None:
+    """Align ``neuron_timeseries`` activation rows with metrics x-axis, or return None."""
+    A = _activation_sample_matrix(nts, str(neuron_id))
+    if A is None or A.ndim != 2:
+        return None
+    tags = [str(t) for t in nts.get("checkpoint_tags", [])]
+    cp_iters = metrics.get("checkpoint_iterations")
+    n = int(A.shape[0])
+    if not tags or len(tags) != n:
+        return None
+    if cp_iters is None or len(cp_iters) != len(tags):
+        return None
+    all_cp_idxs = list(range(n))
+    xs, _, x_mode = _x_values_for_checkpoints(all_cp_idxs, metrics)
+    return A, xs, x_mode
+
+
+def mpl_neuron_assigned_digit_count_over_time(
+    neuron_id: str,
+    df_nd: pd.DataFrame,
+    metrics: dict[str, np.ndarray],
+) -> Figure:
+    """Line chart: number of assigned digits per checkpoint for one neuron."""
+    nid_key = str(neuron_id)
+    mask_nid = df_nd["neuron_id"].astype(str) == nid_key
+    if not mask_nid.any():
+        fig, ax = plt.subplots(figsize=(8, 2.5), dpi=100)
+        ax.text(
+            0.5,
+            0.5,
+            "No neuron-digit rows for this ID.",
+            ha="center",
+            va="center",
+            transform=ax.transAxes,
+            color=C["muted"],
+            fontsize=12,
+        )
+        ax.axis("off")
+        _apply_figure_style(fig)
+        return fig
+
+    layer_name = df_nd.loc[mask_nid, "layer_name"].iloc[0]
+    layer_df = df_nd[df_nd["layer_name"] == layer_name]
+    all_cp_idxs = sorted(layer_df["checkpoint_idx"].unique())
+    assigned = df_nd[mask_nid & (df_nd["status"] == "assigned")]
+    per_cp = assigned.groupby("checkpoint_idx", sort=False).size()
+    y = np.array([int(per_cp.get(ci, 0)) for ci in all_cp_idxs], dtype=int)
+    xs, _, x_mode = _x_values_for_checkpoints(all_cp_idxs, metrics)
+
+    fig, ax = plt.subplots(figsize=(8, 3.5), dpi=100)
+    ax.plot(xs, y, marker="o", markersize=4, color=C["blue"], linewidth=1.5)
+    ax.set_ylim(bottom=0)
+    ax.set_xlabel("Iteration" if x_mode == "iteration" else "Checkpoint")
+    ax.set_ylabel("# assigned digits")
+    disp = layer_name.replace("hidden.", "H").replace("head", "Head")
+    ax.set_title(
+        f"Assigned digit count over time — {_compact_neuron_label(neuron_id)} ({disp})",
+        fontsize=12,
+        color=C["fg"],
+        pad=_AX_TITLE_PAD,
+    )
+    add_trial_boundaries_mpl(ax, metrics, x_mode)
+    fig.tight_layout()
+    _apply_figure_style(fig)
+    return fig
+
+
+def mpl_neuron_eval_activation_mean_over_time(
+    neuron_id: str,
+    nts: dict[str, np.ndarray],
+    metrics: dict[str, np.ndarray],
+) -> Figure:
+    """Mean pre-nonlinearity eval-batch activation per checkpoint (``neuron_timeseries.npz``)."""
+    aligned = _eval_act_x_aligned(neuron_id, nts, metrics)
+    if aligned is None:
+        fig, ax = plt.subplots(figsize=(8, 2.5), dpi=100)
+        msg = (
+            "No eval-batch activation timeseries for this neuron "
+            "(need neuron_timeseries.npz with aligned checkpoint_tags / iterations)."
+        )
+        if not nts:
+            msg = "No neuron_timeseries.npz data loaded."
+        ax.text(
+            0.5,
+            0.5,
+            msg,
+            ha="center",
+            va="center",
+            transform=ax.transAxes,
+            color=C["muted"],
+            fontsize=11,
+        )
+        ax.axis("off")
+        _apply_figure_style(fig)
+        return fig
+
+    A, xs, x_mode = aligned
+    mean_act = np.nanmean(A, axis=1)
+    n_s = int(A.shape[1])
+    if n_s > 1:
+        std_act = np.nanstd(A, axis=1, ddof=1)
+        sem = std_act / np.sqrt(n_s)
+        lo = mean_act - 1.96 * sem
+        hi = mean_act + 1.96 * sem
+    else:
+        lo = hi = mean_act
+
+    fig, ax = plt.subplots(figsize=(8, 3.5), dpi=100)
+    ax.fill_between(xs, lo, hi, color=C["blue"], alpha=0.22, linewidth=0, label="95% CI (mean)")
+    ax.plot(
+        xs,
+        mean_act,
+        color=C["blue"],
+        linewidth=1.5,
+        marker="o",
+        markersize=3,
+        label="mean (eval batch)",
+    )
+    ax.set_xlabel("Iteration" if x_mode == "iteration" else "Checkpoint")
+    ax.set_ylabel("Pre-NL activation")
+    ax.set_title(
+        f"Mean eval-batch activation — {_compact_neuron_label(neuron_id)}",
+        fontsize=12,
+        color=C["fg"],
+        pad=_AX_TITLE_PAD,
+    )
+    add_trial_boundaries_mpl(ax, metrics, x_mode)
+    ax.legend(loc="best", fontsize=9, framealpha=0.92, edgecolor=C["border"])
+    fig.tight_layout()
+    _apply_figure_style(fig)
+    return fig
+
+
+def mpl_neuron_eval_activation_angle_over_time(
+    neuron_id: str,
+    nts: dict[str, np.ndarray],
+    metrics: dict[str, np.ndarray],
+    *,
+    signed_angle_y_deg_limit: float = 90.0,
+    min_idx: int = 0,
+) -> Figure:
+    """Per-digit signed slope angle in the (iteration, activation) plane.
+
+    For each eval sample (K=5 per digit), consecutive checkpoints define a segment
+    from ``(x_t, a_t)`` to ``(x_{t+1}, a_{t+1})``. The signed angle is
+    ``atan2(Δa, Δx)`` in degrees (positive when activation rises with x).
+    Values are clipped to ``±signed_angle_y_deg_limit`` for display (default 90°).
+
+    Layout: 10 subplots in a 5x2 grid (two digits per row), matching the MNIST
+    eval batch order ``5*d + k``.
+    """
+    aligned = _eval_act_x_aligned(neuron_id, nts, metrics)
+    if aligned is None:
+        fig, ax = plt.subplots(figsize=(8, 2.5), dpi=100)
+        msg = (
+            "No eval-batch activation timeseries for this neuron "
+            "(need neuron_timeseries.npz with aligned checkpoint_tags / iterations)."
+        )
+        if not nts:
+            msg = "No neuron_timeseries.npz data loaded."
+        ax.text(
+            0.5,
+            0.5,
+            msg,
+            ha="center",
+            va="center",
+            transform=ax.transAxes,
+            color=C["muted"],
+            fontsize=11,
+        )
+        ax.axis("off")
+        _apply_figure_style(fig)
+        return fig
+
+    A, xs, x_mode = aligned
+    if A.shape[0] < 2:
+        fig, ax = plt.subplots(figsize=(8, 2.5), dpi=100)
+        ax.text(
+            0.5,
+            0.5,
+            "Need at least two checkpoints for angle plot.",
+            ha="center",
+            va="center",
+            transform=ax.transAxes,
+            color=C["muted"],
+            fontsize=12,
+        )
+        ax.axis("off")
+        _apply_figure_style(fig)
+        return fig
+
+    if int(A.shape[1]) < _NETWORK_EXPECTED_BATCH:
+        fig, ax = plt.subplots(figsize=(8, 2.5), dpi=100)
+        ax.text(
+            0.5,
+            0.5,
+            f"Expected {_NETWORK_EXPECTED_BATCH} eval samples; got {int(A.shape[1])}.",
+            ha="center",
+            va="center",
+            transform=ax.transAxes,
+            color=C["muted"],
+            fontsize=11,
+        )
+        ax.axis("off")
+        _apply_figure_style(fig)
+        return fig
+
+    xs_arr = np.asarray(xs, dtype=np.float64)
+    dx = np.diff(xs_arr)
+    xs_seg = xs_arr[1:]
+
+    n_rows, n_cols = 5, 2
+    fig, axes = plt.subplots(
+        n_rows,
+        n_cols,
+        figsize=(10, 14),
+        dpi=100,
+        sharey=True,
+    )
+    lim = float(signed_angle_y_deg_limit)
+
+    handles, labels = None, None  # Will store handles for the legend (from first axes)
+
+    for d in range(_NETWORK_N_DIGITS):
+        ax = axes[d // n_cols, d % n_cols]
+        for k in range(_NETWORK_SAMPLES_PER_DIGIT):
+            col = _NETWORK_SAMPLES_PER_DIGIT * d + k
+            dy = np.diff(A[:, col].astype(np.float64, copy=False))
+            ang_deg = np.degrees(np.arctan2(dy, dx))
+            ax.plot(
+                xs_seg[min_idx:],
+                ang_deg[min_idx:],
+                color=_NETWORK_EVAL_K_LINE_COLORS[k % len(_NETWORK_EVAL_K_LINE_COLORS)],
+                linewidth=1.25,
+                marker=".",
+                markersize=2.5,
+                label=f"K={k + 1}",
+                alpha=0.5,
+            )
+        ax.axhline(0.0, color=C["border"], linewidth=0.8, linestyle="-", zorder=0)
+        ax.set_ylim(-lim, lim)
+        ax.set_title(
+            f"Digit {d}",
+            fontsize=10,
+            color=C["fg"],
+            pad=_AX_TITLE_PAD,
+        )
+        add_trial_boundaries_mpl(ax, metrics, x_mode, min_idx=min_idx)
+        if d == 0:
+            # Store handles and labels for the legend from the first axes
+            handles, labels = ax.get_legend_handles_labels()
+
+    # Digit grid: no per-axes x title (matches Plotly neuron detail digit rows:
+    # title_text="" on those x-axes so trial/stage annotations stay readable).
+    x_label = "Iteration" if x_mode == "iteration" else "Checkpoint"
+    for ax in axes[:, 0]:
+        ax.set_ylabel("Signed angle (°)", fontsize=10, color=C["fg"])
+
+    fig.suptitle(
+        f"Signed atan2(Δactivation, Δx) per eval sample — {_compact_neuron_label(neuron_id)} "
+        f"(clipped to ±{lim:g}°)",
+        fontsize=12,
+        color=C["fg"],
+        y=0.995,
+    )
+    if handles and labels:
+        # Place the legend at the top center below the title
+        fig.legend(
+            handles,
+            labels,
+            loc="upper center",
+            bbox_to_anchor=(0.5, 0.97),
+            ncol=_NETWORK_SAMPLES_PER_DIGIT,
+            fontsize=9,
+            framealpha=0.92,
+            edgecolor=C["border"],
+        )
+
+    fig.tight_layout(rect=(0, 0, 1, 0.97))
+    fig.supxlabel(x_label, fontsize=10, color=C["fg"])
+    _apply_figure_style(fig)
+    return fig
 
 
 def mpl_layer_inactive_count(

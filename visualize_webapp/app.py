@@ -219,7 +219,7 @@ def _format_training_config_text(
 
 
 def _npz(
-    eid: str, mid: str, oid: str, fname: str, *, rid: str
+    eid: str, mid: str, oid: str, fname: str, *, rid: str, w_cache: bool = True
 ) -> dict[str, np.ndarray]:
     key = (fname, eid, rid, mid, oid)
     if key in _cache:
@@ -228,25 +228,26 @@ def _npz(
     if not path.exists():
         return {}
     data = dict(np.load(str(path), allow_pickle=True))
-    _cache[key] = data
+    if w_cache:
+        _cache[key] = data
     return data
 
 
-def _metrics(e: str, m: str, o: str, *, rid: str) -> dict[str, np.ndarray]:
-    return _npz(e, m, o, "training_metrics.npz", rid=rid)
+def _metrics(e: str, m: str, o: str, *, rid: str, w_cache: bool = True) -> dict[str, np.ndarray]:
+    return _npz(e, m, o, "training_metrics.npz", rid=rid, w_cache=w_cache)
 
 
-def _nts(e: str, m: str, o: str, *, rid: str) -> dict[str, np.ndarray]:
-    return _npz(e, m, o, "neuron_timeseries.npz", rid=rid)
+def _nts(e: str, m: str, o: str, *, rid: str, w_cache: bool = True) -> dict[str, np.ndarray]:
+    return _npz(e, m, o, "neuron_timeseries.npz", rid=rid, w_cache=w_cache)
 
 
-def _sigs(e: str, m: str, o: str, *, rid: str) -> dict[str, np.ndarray]:
-    return _npz(e, m, o, "signals.npz", rid=rid)
+def _sigs(e: str, m: str, o: str, *, rid: str, w_cache: bool = True) -> dict[str, np.ndarray]:
+    return _npz(e, m, o, "signals.npz", rid=rid, w_cache=w_cache)
 
 # `pp` stands for post-processing
 
 def _pp_csv(
-    eid: str, mid: str, oid: str, fname: str, *, rid: str
+    eid: str, mid: str, oid: str, fname: str, *, rid: str, w_cache: bool = True
 ) -> pd.DataFrame | None:
     key = ("__pp_csv__", fname, eid, rid, mid, oid)
     if key in _cache:
@@ -256,24 +257,25 @@ def _pp_csv(
         _cache[key] = None
         return None
     df = pd.read_csv(str(path))
-    _cache[key] = df
+    if w_cache:
+        _cache[key] = df
     return df
 
 
 def _pp_neuron_digit(
-    e: str, m: str, o: str, *, rid: str
+    e: str, m: str, o: str, *, rid: str, w_cache: bool = True
 ) -> pd.DataFrame | None:
-    return _pp_csv(e, m, o, "post_processing_neuron_digit.csv", rid=rid)
+    return _pp_csv(e, m, o, "post_processing_neuron_digit.csv", rid=rid, w_cache=w_cache)
 
 
-def _pp_dead(e: str, m: str, o: str, *, rid: str) -> pd.DataFrame | None:
-    return _pp_csv(e, m, o, "post_processing_dead.csv", rid=rid)
+def _pp_dead(e: str, m: str, o: str, *, rid: str, w_cache: bool = True) -> pd.DataFrame | None:
+    return _pp_csv(e, m, o, "post_processing_dead.csv", rid=rid, w_cache=w_cache)
 
 
 def _pp_train_act(
-    e: str, m: str, o: str, *, rid: str
+    e: str, m: str, o: str, *, rid: str, w_cache: bool = True
 ) -> dict[str, np.ndarray]:
-    return _npz(e, m, o, "post_processing_train_act.npz", rid=rid)
+    return _npz(e, m, o, "post_processing_train_act.npz", rid=rid, w_cache=w_cache)
 
 
 # -- Plotly helpers -----------------------------------------------------------
@@ -1338,6 +1340,20 @@ def _activation_sample_matrix(
         return None
     return np.asarray(act_arr, dtype=np.float64)
 
+def _weights_sample_matrix(
+    nts: dict[str, np.ndarray], nid: str
+) -> np.ndarray | None:
+    """Return shape (n_checkpoints, n_samples) float array, or None."""
+    safe = nid.replace(":", "__")
+    key = f"weights__{safe}"
+    if key not in nts:
+        return None
+    weights_arr = nts[key]
+    if weights_arr.ndim < 2:
+        return None
+    return np.asarray(weights_arr, dtype=np.float64)
+
+
 
 def _head_layer_from_nts(nts: dict[str, np.ndarray]) -> str | None:
     """Return the head (last) layer name from the unit_node_ids in nts."""
@@ -1402,7 +1418,7 @@ def _build_neuron_detail_figure(
     smooth_window: int = 1,
     post_nonlinearity: bool = False,
 ) -> go.Figure:
-    """Build one combined figure: 10-digit activation grid (mean +/- 95% SE over K=5),
+    """Build one combined figure: 10-digit activation grid (one trace per eval sample, K=5),
     then shared x-axis rows for dw/w, grad norm, cosine sim, Adam / Shampoo / LR signals.
     """
     nts = _nts(eid, mid, oid, rid=rid)
@@ -1500,27 +1516,28 @@ def _build_neuron_detail_figure(
     k_samp = _NETWORK_SAMPLES_PER_DIGIT
     for d in range(_NETWORK_N_DIGITS):
         block = A[:, d * k_samp : (d + 1) * k_samp].astype(np.float64, copy=False)
-        y_mean = np.mean(block, axis=1)
-        if k_samp <= 1:
-            y_se = np.zeros_like(y_mean)
-        else:
-            y_se = np.std(block, axis=1, ddof=1) / np.sqrt(float(k_samp))
         r_1b = d // _NEURON_ACT_GRID_COLS + 1
         c_1b = d % _NEURON_ACT_GRID_COLS + 1
-        _add_neuron_dw_over_w_mean_se(
-            fig,
-            row=r_1b,
-            col=c_1b,
-            secondary_y=False,
-            x=x_iters,
-            y_mean=y_mean,
-            y_se=y_se,
-            name="Mean activation",
-            color=C["blue"],
-            hover=hover,
-            legend="legend" if d == 0 else f"legend{d + 1}",
-            showlegend=(d == 0),
-        )
+        trace_kw: dict[str, Any] = dict(row=r_1b, col=c_1b)
+        subplot_legend = "legend" if d == 0 else f"legend{d + 1}"
+        for k in range(k_samp):
+            y_k = block[:, k]
+            fig.add_trace(
+                go.Scatter(
+                    x=x_iters,
+                    y=y_k,
+                    mode="lines+markers",
+                    name=f"K={k + 1}",
+                    legend=subplot_legend,
+                    legendgroup=f"eval_k_{k}",
+                    showlegend=(d == 0),
+                    text=hover,
+                    hoverinfo="text+y",
+                    line=dict(color=_NETWORK_EVAL_K_LINE_COLORS[k], width=1.5),
+                    marker=dict(size=3),
+                ),
+                **trace_kw,
+            )
 
     def _legend_for_subplot(si: int) -> str:
         return "legend" if si == 1 else f"legend{si}"
@@ -1695,7 +1712,7 @@ def _build_neuron_detail_figure(
 
     for r in range(1, _NEURON_ACT_GRID_ROWS + 1):
         for c in range(1, _NEURON_ACT_GRID_COLS + 1):
-            fig.update_yaxes(title_text="Mean", row=r, col=c)
+            fig.update_yaxes(title_text="Activation", row=r, col=c)
 
     fig.update_yaxes(title_text=r"$|\Delta w|/|w|$", row=r_dw, col=1)
     if r_grad is not None:
@@ -2172,19 +2189,26 @@ def compute_recovery_cumsum_by_layer(
 def per_neuron_recovery_counts(
     df_dead: pd.DataFrame,
     layer_order: list[str],
-) -> dict[str, int]:
-    """Total recovery transitions per neuron (hidden layers only; excludes ``head``)."""
+) -> tuple[dict[str, int], dict[str, list[int]]]:
+    """Per-neuron dead→alive recoveries (hidden layers only; excludes ``head``).
+
+    Returns ``(counts, recovery_checkpoint_idx)`` where ``counts[nid]`` is the
+    number of transitions from dead to alive between consecutive checkpoints,
+    and ``recovery_checkpoint_idx[nid]`` lists the ``checkpoint_idx`` value at
+    the checkpoint *after* each such transition (same convention as the recovery
+    cumsum plot).
+    """
     hidden = [ln for ln in layer_order if ln != "head"]
     if not hidden or df_dead is None or df_dead.empty:
-        return {}
+        return {}, {}
 
     sub = df_dead[df_dead["layer_name"].isin(hidden)]
     if sub.empty:
-        return {}
+        return {}, {}
 
-    counts: dict[str, int] = {
-        str(x): 0 for x in sub["neuron_id"].unique()
-    }
+    nids = [str(x) for x in sub["neuron_id"].unique()]
+    counts: dict[str, int] = { nid: 0 for nid in nids }
+    recovery_checkpoint_idx: dict[str, list[int]] = { nid: [] for nid in nids }
     for ln in hidden:
         layer_df = sub[sub["layer_name"] == ln]
         all_cp_idxs = sorted(x for x in layer_df["checkpoint_idx"].unique().tolist())
@@ -2202,12 +2226,12 @@ def per_neuron_recovery_counts(
         n_per = n_cp
         for i, nid in enumerate(all_neurons):
             d = dead[i * n_per : (i + 1) * n_per]
-            n_rec = 0
+            key = str(nid)
             for j in range(n_cp - 1):
                 if d[j] and not d[j + 1]:
-                    n_rec += 1
-            counts[str(nid)] += n_rec
-    return counts
+                    counts[key] += 1
+                    recovery_checkpoint_idx[key].append(int(all_cp_idxs[j + 1]))
+    return counts, recovery_checkpoint_idx
 
 
 def _build_recovery_cumsum_plot(
