@@ -33,7 +33,7 @@ from visualize_webapp.notebook.final.final_experiment_display import (
 	ExperimentDisplayLabels,
 	two_row_cat12_from_sorted,
 )
-from visualize_webapp.notebook.network_analysis_mpl import add_trial_boundaries_mpl
+from visualize_webapp.plot_helpers import add_trial_boundaries_mpl
 from visualize_webapp.notebook.scoring_helpers import (
 	angle_score_function,
 	filter_periods,
