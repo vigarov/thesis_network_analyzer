@@ -6,3 +6,6 @@ README.md
 *.ipynb_checkpoints
 temp_*/
 .vscode/
+to_delete/
+test.json
+* copy *.ipynb
