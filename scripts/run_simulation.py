@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Main entrypoint for running training simulations.
 
-Results are written under::
+Results are written under:
 
-	results/<experiment_id>/<result_id>/<model_id>/
+	`results/<experiment_id>/<result_id>/<model_id>/`
 
 where `result_id` is the first six hex characters of a SHA-256 fingerprint of the
 training config (with a numeric suffix if that prefix collides with a different config).
@@ -18,11 +18,11 @@ config or use a different run directory (different training fingerprint).
 
 Usage examples
 --------------
-From a config file::
+From a config file:
 
 	uv run run-simulation --config path/to/config.json
 
-With explicit arguments::
+With explicit arguments:
 
 	uv run run-simulation \
 		--experiment DigitAThenDigitB_75_25 \
@@ -32,7 +32,7 @@ With explicit arguments::
 		--loss ce \
 		--trial-epochs 1 --base-lr 1e-3 --batch-size 1 --seed 3003
 
-Multiple optimizers/models/experiments (CSV lists)::
+Multiple optimizers/models/experiments (CSV lists):
 
 	uv run run-simulation --experiment Exp1,Exp2 --model M1,M2 --optimizer adam,adagrad
 """
