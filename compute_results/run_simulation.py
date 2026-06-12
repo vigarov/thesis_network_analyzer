@@ -5,15 +5,15 @@ Results are written under::
 
 	results/<experiment_id>/<result_id>/<model_id>/
 
-where ``result_id`` is the first six hex characters of a SHA-256 fingerprint of the
+where `result_id` is the first six hex characters of a SHA-256 fingerprint of the
 training config (with a numeric suffix if that prefix collides with a different config).
 
-Use ``all`` as a model or optimizer token (JSON or CLI) to include every name in the
-corresponding registry (sorted). You can combine with explicit names, e.g. ``adam,all``,
+Use `all` as a model or optimizer token (JSON or CLI) to include every name in the
+corresponding registry (sorted). You can combine with explicit names, e.g. `adam,all`,
 to union shorthands with all registered extractors.
 
-``--force`` re-runs requested optimizers even when outputs already exist. Training
-config mismatches against an existing ``config.json`` are never overridden; fix the
+`--force` re-runs requested optimizers even when outputs already exist. Training
+config mismatches against an existing `config.json` are never overridden; fix the
 config or use a different run directory (different training fingerprint).
 
 Usage examples
@@ -48,7 +48,7 @@ import torch
 import traceback
 
 # Ensure the project root is on sys.path so bare package imports work when
-# the script is invoked directly (e.g. ``python compute_results/run_simulation.py``).
+# the script is invoked directly (e.g. `python compute_results/run_simulation.py`).
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
 	sys.path.insert(0, str(_PROJECT_ROOT))
@@ -73,7 +73,7 @@ from compute_results.config_guard import (
 from compute_results.defaults import OPTIMIZER_LR_KEY, SHAMPOO_PRECONDITIONER_EPSILON_KEY
 from compute_results.training_loop import train_with_config
 from experiments import get_experiment, list_experiments
-from models import apply_model_weight_init, get_model, list_models, validate_he_init
+from models import apply_model_weight_init, get_model, list_models, parse_he_init
 from optimizers import get_extractor, list_extractors
 
 
@@ -93,10 +93,10 @@ def _parse_csv(value: str | list) -> list[str]:
 
 
 def _resolve_optimizer(name: str, base_lr: float, **kwargs) -> tuple[str, dict]:
-	"""Resolve shorthand / class name to (registry class name, ``get_extractor`` kwargs).
+	"""Resolve shorthand / class name to (registry class name, `get_extractor` kwargs).
 
-	*base_lr* always becomes ``OPTIMIZER_LR_KEY`` (overrides the same key in
-	``**kwargs`` if present). Remaining ``**kwargs`` are forwarded
+	*base_lr* always becomes `OPTIMIZER_LR_KEY` (overrides the same key in
+	`**kwargs` if present). Remaining `**kwargs` are forwarded
 	"""
 	name = name.strip()
 	if name in OPTIMIZER_SHORTHAND:
@@ -523,7 +523,7 @@ def main() -> int:
 		sys.exit(1)
 
 	try:
-		validate_he_init(he_init)
+		parse_he_init(he_init)
 	except (TypeError, ValueError) as e:
 		print(f"ERROR: Invalid --he-init / he_init: {e}", file=sys.stderr)
 		sys.exit(1)

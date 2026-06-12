@@ -10,7 +10,7 @@ from typing import Any
 
 import torch
 
-import experiments  # noqa: F401 – side-effect: registers all experiment classes
+import experiments  # noqa: F401 - IMPORTANT! (side-effect: registers all experiment classes)
 from compute_results.constants import (
 	ALL_AVAILABLE_SELECTION,
 	FINGERPRINT_EXCLUDE_KEYS,
@@ -19,7 +19,7 @@ from compute_results.constants import (
 	INITIAL_MODEL_OPTIMIZER_STATE_FILENAME,
 )
 from experiments.base import get_registered_experiment_class
-from experiments_new.mnist.common.label_perm import parse_restrain_digits
+from experiments.mnist.common.label_perm import parse_restrain_digits
 
 
 def parse_checkpoint_cadence(cadence: str) -> tuple[str, int | None]:
@@ -48,7 +48,7 @@ def parse_checkpoint_cadence(cadence: str) -> tuple[str, int | None]:
 
 
 def normalize_loss(loss: str) -> str:
-	"""Map a user-facing loss name to a canonical key: ``ce`` or ``mse``."""
+	"""Map a user-facing loss name to a canonical key: `ce` or `mse`."""
 	s = loss.strip().lower().replace("_", " ")
 	s = re.sub(r"\s+", " ", s)
 	if s in ("ce", "cross entropy", "crossentropy"):
@@ -132,20 +132,20 @@ def validate_experiment_config_constraints(
 ) -> None:
 	"""Validate experiment-specific config constraints.
 
-	For experiments with ``has_pretrain=True``:
-	- Rejects deprecated keys: ``base_ratio``, ``num_pretrain_samples``, ``num_stage_samples``.
-	- Requires ``pretrain_on_k_samples``: ``int``, ``>= 1``, divisible by 10.
-	- Requires ``num_trial_samples``: ``int``, ``>= 1``.
-	- For ``PretrainThenShuffleMislabel``, when *experiment_runs* is provided,
-	  requires ``(num_trial_samples * experiment_runs) % N == 0`` where ``N`` is 10
-	  or ``len(restrain_digits)`` when ``restrain_digits`` is set.
-	- For ``PretrainControlBase``, requires ``num_trial_samples % 10 == 0`` (balanced remainder trials).
+	For experiments with `has_pretrain=True`:
+	- Rejects deprecated keys: `base_ratio`, `num_pretrain_samples`, `num_stage_samples`.
+	- Requires `pretrain_on_k_samples`: `int`, `>= 1`, divisible by 10.
+	- Requires `num_trial_samples`: `int`, `>= 1`.
+	- For `PretrainThenShuffleMislabel`, when *experiment_runs* is provided,
+	  requires `(num_trial_samples * experiment_runs) % N == 0` where `N` is 10
+	  or `len(restrain_digits)` when `restrain_digits` is set.
+	- For `PretrainControlBase`, requires `num_trial_samples % 10 == 0` (balanced remainder trials).
 
-	For ``ControlBase`` (no pretrain flag): requires ``pretrain_on_k_samples`` (K split),
-	``num_trial_samples``, and ``num_trial_samples % 10 == 0``.
+	For `ControlBase` (no pretrain flag): requires `pretrain_on_k_samples` (K split),
+	`num_trial_samples`, and `num_trial_samples % 10 == 0`.
 
 	Raises:
-		KeyError: if ``experiment_class`` is not registered.
+		KeyError: if `experiment_class` is not registered.
 		ValueError / TypeError: on constraint violations.
 	"""
 	# --- reject globally deprecated keys (all experiment types, even unknown ones) ---
@@ -334,7 +334,7 @@ def validate_experiment_config_constraints(
 
 
 def normalize_initial_model_mode(mode: str) -> str:
-	"""Return ``init`` or ``pretrain``."""
+	"""Return `init` or `pretrain`."""
 	m = mode.strip().lower()
 	if m in ("init", "pretrain"):
 		return m
@@ -386,7 +386,7 @@ def _initial_bundle_probe_order(registry_class_name: str) -> list[tuple[str, boo
 def _bundle_subdirs_for_probe(
 	bundle_root: Path, probe_name: str, *, exact: bool
 ) -> list[Path]:
-	"""Resolve to zero or one subfolder path(s) for this probe (see ``_initial_bundle_probe_order``)."""
+	"""Resolve to zero or one subfolder path(s) for this probe (see `_initial_bundle_probe_order`)."""
 	if exact:
 		sub = bundle_root / probe_name
 		return [sub] if sub.is_dir() else []
@@ -405,10 +405,10 @@ def _bundle_subdirs_for_probe(
 
 
 def _checkpoint_in_bundle_subdir(bundle_root: Path, registry_class_name: str) -> Path:
-	"""Resolve ``bundle_root / <subfolder> / model.pt`` (or ``model.pth``).
+	"""Resolve `bundle_root / <subfolder> / model.pt` (or `model.pth`).
 
 	The registry class directory name is matched **exactly**. Each CLI shorthand from
-	``INITIAL_MODEL_OPTIMIZER_SHORTHAND_TO_CLASS`` matches a child directory whose name
+	`INITIAL_MODEL_OPTIMIZER_SHORTHAND_TO_CLASS` matches a child directory whose name
 	**starts with** that shorthand. Probes run in order: class name first, then shorthands
 	(sorted by shorthand key).
 	"""
@@ -511,18 +511,18 @@ def validate_initial_model_path(
 ) -> str:
 	"""Verify *path_str* and return a SHA-256 fingerprint for the initial weights.
 
-	- Single file: must be a readable ``.pt`` or ``.pth`` checkpoint
-	  (``torch.save(model.state_dict(), ...)``); returns SHA-256 of file bytes.
+	- Single file: must be a readable `.pt` or `.pth` checkpoint
+	  (`torch.save(model.state_dict(), ...)`); returns SHA-256 of file bytes.
 	- Directory: for each entry in *optimizer_registry_classes* (resolved extractor
-	  class per ``--optimizer`` entry, e.g. ``AdamExtractor``), there must be a
+	  class per `--optimizer` entry, e.g. `AdamExtractor`), there must be a
 	  subfolder whose name equals that class, or (if no class-named folder matches)
 	  whose name **starts with** a CLI shorthand key from
-	  ``INITIAL_MODEL_OPTIMIZER_SHORTHAND_TO_CLASS``. Each subfolder must contain:
-		- exactly one of ``model.pt`` or ``model.pth`` (model weights),
-		- ``optimizer.pt`` (optimizer state dict, ``torch.save(opt.state_dict(), ...)``).
+	  `INITIAL_MODEL_OPTIMIZER_SHORTHAND_TO_CLASS`. Each subfolder must contain:
+		- exactly one of `model.pt` or `model.pth` (model weights),
+		- `optimizer.pt` (optimizer state dict, `torch.save(opt.state_dict(), ...)`).
 	  Class name is tried before shorthand prefixes. Extra subfolders are ignored.
 	  Returns a deterministic hash of sorted
-	  ``(registry_class, "model"|"optimizer", sha256)`` triples.
+	  `(registry_class, "model"|"optimizer", sha256)` triples.
 	"""
 	path = _resolve_use_initial_model_base(path_str)
 	if path.is_file():
@@ -555,7 +555,7 @@ def load_initial_model_state_dict(
 	*,
 	registry_class_name: str = "",
 ) -> dict[str, Any]:
-	"""Load model ``state_dict`` from *path_str* (relative to cwd if not absolute).
+	"""Load model `state_dict` from *path_str* (relative to cwd if not absolute).
 
 	If *path_str* is a directory, *registry_class_name* selects the optimizer; the
 	subdirectory is resolved with the same rules as validation (exact class dirname,
@@ -578,12 +578,12 @@ def load_initial_optimizer_state_dict(
 	registry_class_name: str,
 	map_location: Any = "cpu",
 ) -> dict[str, Any]:
-	"""Load optimizer ``state_dict`` from a bundle directory.
+	"""Load optimizer `state_dict` from a bundle directory.
 
 	*path_str* must be a directory (only meaningful for bundle layouts). The subfolder
-	is resolved by the same rules as ``load_initial_model_state_dict``; ``optimizer.pt``
-	inside that subfolder is loaded with ``weights_only=False`` (optimizer state dicts
-	include non-tensor ``param_groups`` entries).
+	is resolved by the same rules as `load_initial_model_state_dict`; `optimizer.pt`
+	inside that subfolder is loaded with `weights_only=False` (optimizer state dicts
+	include non-tensor `param_groups` entries).
 	"""
 	base = _resolve_use_initial_model_base(path_str)
 	if not base.is_dir():
@@ -621,8 +621,8 @@ def result_id_for_config(
 ) -> str:
 	"""Directory name under *experiment_dir* for this training config (first 6 hex of digest).
 
-	If ``experiment_dir / <id> / model_id`` already exists with a different training
-	payload, tries ``<prefix>_2``, ``<prefix>_3``, ...
+	If `experiment_dir / <id> / model_id` already exists with a different training
+	payload, tries `<prefix>_2`, `<prefix>_3`, ...
 	"""
 	prefix = compute_fingerprint(config)[:6]
 	for i in range(1, 10_000):
@@ -726,7 +726,7 @@ def _diff_fingerprint_payloads(
 def guard_training_config(results_dir: Path, config: dict[str, Any]) -> None:
 	"""Check that *config* matches any previously stored training config on disk.
 
-	Always raises ConfigConflictError on fingerprint-payload mismatch (``--force`` does
+	Always raises ConfigConflictError on fingerprint-payload mismatch (`--force` does
 	not bypass this; it only affects optimizer reruns and optimizer config guards).
 	"""
 	config_path = results_dir / "config.json"
