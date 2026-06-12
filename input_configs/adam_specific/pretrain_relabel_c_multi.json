@@ -1,7 +1,9 @@
 {
-    "experiment_class": "PretrainBase_thenDigitA",
+    "experiment_class": "PretrainRelabelC",
     "experiment_config": {
         "digitA": 0,
+        "digitB": 1,
+        "digitC": 2,
         "pretrain_on_k_samples": 1000,
         "num_trial_samples": 100
     },
@@ -9,9 +11,9 @@
     "model_config": {
         "activation": "relu"
     },
-    "optimizer": "all",
+    "optimizer": "AdamExtractor",
     "trial_epochs": 1,
-    "base_lr": 0.01,
+    "base_lr": 0.005,
     "batch_size": 1,
     "seed": 3003,
     "activation": "relu",
@@ -22,6 +24,6 @@
     "internal_keep_tensors": true,
     "experiment_runs": 10,
     "experiment_variability": "change_digits",
-    "use_initial_model": "local/save/optimizer_pretrained/",
-    "initial_model_mode": "pretrain"
+    "initial_model_mode": "pretrain",
+    "use_initial_model": "local/save/optimizer_pretrained/"
 }

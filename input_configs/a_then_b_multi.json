@@ -2,7 +2,9 @@
     "experiment_class": "DigitAThenDigitB_75_25",
     "experiment_config": {
         "digitA": 0,
-        "digitB": 1
+        "digitB": 1,
+        "digitC": 2,
+        "num_trial_samples": 100
     },
     "model_class": "DNN5Hidden64",
     "model_config": {
@@ -19,7 +21,6 @@
     "checkpoint_cadence": "1 its",
     "device": "cuda",
     "internal_keep_tensors": true,
-    "experiment_runs": 2,
-    "experiment_variability": "change_digits",
-    "samples_per_digit": 100
+    "experiment_runs": 10,
+    "experiment_variability": "change_digits"
 }

@@ -9,9 +9,9 @@
     "model_config": {
         "activation": "relu"
     },
-    "optimizer": "all",
+    "optimizer": "AdamExtractor",
     "trial_epochs": 1,
-    "base_lr": 0.01,
+    "base_lr": 0.005,
     "batch_size": 1,
     "seed": 3003,
     "activation": "relu",

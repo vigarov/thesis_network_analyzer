@@ -2,7 +2,7 @@
     "experiment_class": "PretrainThenDigitAThenMislabelAsBThenDigitB",
     "experiment_config": {
         "digitA": 0,
-        "num_pretrain_samples": 300,
+        "pretrain_on_k_samples": 1000,
         "num_trial_samples": 100
     },
     "model_class": "DNN5Hidden64",
@@ -22,6 +22,6 @@
     "internal_keep_tensors": true,
     "experiment_runs": 10,
     "experiment_variability": "change_digits",
-    "use_initial_model": "results_pretrain/pretrain_relabelC_0_1_2_pt300_tr100/065470/dnn_5x64/optimizers/grafted_shampoo_lr0.01/model.pth",
+    "use_initial_model": "local/save/optimizer_pretrained/",
     "initial_model_mode": "pretrain"
 }
