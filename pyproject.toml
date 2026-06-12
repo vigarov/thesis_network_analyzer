@@ -46,6 +46,7 @@ torch-shampoo = { git = "https://github.com/facebookresearch/optimizers.git" }
 
 [project.scripts]
 compute = "scripts.run_simulation:main"
+pretrain-models = "scripts.pretrain_models:main"
 analyse = "scripts.analyse_sim_results:main"
 plot = "visualize_webapp.app:main"
 

@@ -24,6 +24,7 @@ compute_results/config_guard.py
 compute_results/constants.py
 compute_results/defaults.py
 compute_results/post_processing.py
+compute_results/pretrain.py
 compute_results/training_loop.py
 experiments/__init__.py
 experiments/base.py
@@ -63,6 +64,7 @@ optimizers/pure_shampoo_extractor.py
 optimizers/sgd_extractor.py
 scripts/__init__.py
 scripts/analyse_sim_results.py
+scripts/pretrain_models.py
 scripts/run_simulation.py
 visualize_webapp/__init__.py
 visualize_webapp/app.py
@@ -74,17 +76,6 @@ visualize_webapp/plot_helpers.py
 visualize_webapp/post_processing.py
 visualize_webapp/notebook/__init__.py
 visualize_webapp/notebook/convert_post_processing.py
-visualize_webapp/notebook/dw_vicinity.py
-visualize_webapp/notebook/dw_vicinity_plots.py
-visualize_webapp/notebook/eff_lr.py
 visualize_webapp/notebook/gbp_helper.py
 visualize_webapp/notebook/network_analysis_mpl.py
 visualize_webapp/notebook/plot_cross_task.py
-visualize_webapp/notebook/rdx.py
-visualize_webapp/notebook/scoring_constants.py
-visualize_webapp/notebook/scoring_helpers.py
-visualize_webapp/notebook/IQA_optimization/SteerPyrComplex.py
-visualize_webapp/notebook/IQA_optimization/SteerPyrUtils.py
-visualize_webapp/notebook/final/final_additional_plots_helpers.py
-visualize_webapp/notebook/final/final_compare_all_optimizers_helpers.py
-visualize_webapp/notebook/final/final_experiment_display.py

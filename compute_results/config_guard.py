@@ -831,3 +831,365 @@ def save_optimizer_config(
 	(optimizer_dir / "optimizer_config.json").write_text(
 		json.dumps(optimizer_config, indent=2, default=str) + "\n"
 	)
+
+
+# ---------------------------------------------------------------------------
+# Pretrain config (threshold-based MNIST pretraining)
+# ---------------------------------------------------------------------------
+
+def _parse_csv_or_list(value: str | list | int | None) -> list[str]:
+	if value is None:
+		return []
+	if isinstance(value, int):
+		return [str(value)]
+	if isinstance(value, list):
+		return [str(x).strip() for x in value if str(x).strip()]
+	if isinstance(value, str):
+		return [p.strip() for p in value.split(",") if p.strip()]
+	return [str(value).strip()]
+
+
+def _parse_int_list(value: str | list | int | None) -> list[int]:
+	parts = _parse_csv_or_list(value)
+	return [int(p) for p in parts]
+
+
+def _resolve_pretrain_model_seeds(
+	raw: dict[str, Any],
+	*,
+	cli_multi_seeds: str | None,
+) -> list[int]:
+	from compute_results.constants import DEFAULT_MULTI_SEEDS, MULTI_SEEDS_USE_DEFAULT
+
+	if cli_multi_seeds is not None:
+		if cli_multi_seeds == MULTI_SEEDS_USE_DEFAULT:
+			return list(DEFAULT_MULTI_SEEDS)
+		return _parse_int_list(cli_multi_seeds)
+
+	for key in ("multi_seeds", "model_seeds"):
+		if key in raw and raw[key] is not None:
+			val = raw[key]
+			if isinstance(val, int):
+				return [int(val)]
+			return [int(x) for x in val]
+
+	seed = raw.get("seed")
+	if seed is None:
+		seed = raw.get("dataset_seed")
+	if seed is not None:
+		return [int(seed)]
+
+	return list(DEFAULT_MULTI_SEEDS)
+
+
+def parse_pretrain_inputs(
+	raw: dict[str, Any],
+	*,
+	cli: Any,
+) -> dict[str, Any]:
+	"""Merge JSON config and CLI overrides into normalized pretrain parameters."""
+	from compute_results.defaults import SHAMPOO_PRECONDITIONER_EPSILON_KEY
+	from compute_results.constants import (
+		DEFAULT_THRESHOLD_ACC,
+		DEFAULT_TRAIN_K_SAMPLES,
+		EXPERT_THRESHOLD_ACC,
+		EXPERT_TRAIN_K_SAMPLES,
+	)
+
+	expert = bool(raw.get("expert", False)) or bool(getattr(cli, "expert", False))
+
+	exp_cfg = dict(raw.get("experiment_config") or {})
+
+	model_class = getattr(cli, "model", None) or raw.get("model_class")
+	if not model_class:
+		raise ValueError("model_class is required (JSON model_class or --model).")
+
+	optimizer_raw = getattr(cli, "optimizer", None) or raw.get("optimizer")
+	if not optimizer_raw:
+		raise ValueError("optimizer is required (JSON optimizer or --optimizer).")
+	optimizer_names = _parse_csv_or_list(optimizer_raw)
+
+	model_config = dict(raw.get("model_config") or {})
+	activation = getattr(cli, "activation", None) or raw.get("activation", "relu")
+	if not model_config:
+		model_config = {"activation": activation}
+	elif "activation" not in model_config:
+		model_config["activation"] = activation
+
+	base_lr = raw.get("base_lr", 1e-3)
+	if getattr(cli, "base_lr", None) is not None:
+		base_lr = float(cli.base_lr)
+
+	batch_size = int(raw.get("batch_size", 1))
+	if getattr(cli, "batch_size", None) is not None:
+		batch_size = int(cli.batch_size)
+
+	he_init = raw.get("he_init", 3)
+	if getattr(cli, "he_init", None) is not None:
+		he_init = cli.he_init
+
+	init_epsilon = float(raw.get("init_epsilon", 1e-8))
+	if getattr(cli, "init_epsilon", None) is not None:
+		init_epsilon = float(cli.init_epsilon)
+
+	dataset_seed = int(raw.get("dataset_seed", raw.get("seed", 3003)))
+	if getattr(cli, "dataset_seed", None) is not None:
+		dataset_seed = int(cli.dataset_seed)
+
+	cli_multi = getattr(cli, "multi_seeds", None)
+	model_seeds = _resolve_pretrain_model_seeds(raw, cli_multi_seeds=cli_multi)
+
+	train_k_samples = raw.get("train_k_samples")
+	if train_k_samples is None:
+		train_k_samples = exp_cfg.get("pretrain_on_k_samples")
+	if getattr(cli, "train_k_samples", None) is not None:
+		train_k_samples = int(cli.train_k_samples)
+	elif train_k_samples is None:
+		train_k_samples = EXPERT_TRAIN_K_SAMPLES if expert else DEFAULT_TRAIN_K_SAMPLES
+	else:
+		train_k_samples = int(train_k_samples)
+
+	threshold_acc = raw.get("threshold_acc")
+	if getattr(cli, "threshold_acc", None) is not None:
+		threshold_acc = float(cli.threshold_acc)
+	elif threshold_acc is None:
+		threshold_acc = EXPERT_THRESHOLD_ACC if expert else DEFAULT_THRESHOLD_ACC
+	else:
+		threshold_acc = float(threshold_acc)
+
+	max_epochs = int(raw.get("max_epochs", 200))
+	if getattr(cli, "max_epochs", None) is not None:
+		max_epochs = int(cli.max_epochs)
+
+	data_root = str(raw.get("data_root", "./data"))
+	if getattr(cli, "data_root", None) is not None:
+		data_root = str(cli.data_root)
+
+	save = bool(raw.get("save", True))
+	if getattr(cli, "no_save", False):
+		save = False
+	elif getattr(cli, "save", False):
+		save = True
+
+	force = bool(raw.get("force", False)) or bool(getattr(cli, "force", False))
+
+	cli_device = getattr(cli, "device", None)
+	if cli_device is not None:
+		device = str(cli_device)
+	elif raw.get("device") is not None:
+		device = str(raw["device"])
+	else:
+		device = "cuda" if torch.cuda.is_available() else "cpu"
+
+	prefix = "expert_" if expert else ""
+	default_out = f"save/{prefix}optimizer_pretrained/!OPT/!SD/"
+	out_dir = str(raw.get("out_dir", default_out))
+	if getattr(cli, "out_dir", None) is not None:
+		out_dir = str(cli.out_dir)
+
+	opt_extra_kwargs: dict[str, Any] = {}
+	eps_from_json = raw.get(SHAMPOO_PRECONDITIONER_EPSILON_KEY)
+	if eps_from_json is not None:
+		opt_extra_kwargs[SHAMPOO_PRECONDITIONER_EPSILON_KEY] = float(eps_from_json)
+	cli_eps = getattr(cli, "shampoo_preconditioner_epsilon", None)
+	if cli_eps is not None:
+		opt_extra_kwargs[SHAMPOO_PRECONDITIONER_EPSILON_KEY] = float(cli_eps)
+
+	return {
+		"model_class": str(model_class).strip(),
+		"model_config": model_config,
+		"activation": activation,
+		"optimizer_names": optimizer_names,
+		"base_lr": float(base_lr),
+		"batch_size": batch_size,
+		"he_init": he_init,
+		"init_epsilon": init_epsilon,
+		"dataset_seed": dataset_seed,
+		"model_seeds": model_seeds,
+		"train_k_samples": int(train_k_samples),
+		"threshold_acc": float(threshold_acc),
+		"max_epochs": max_epochs,
+		"data_root": data_root,
+		"save": save,
+		"force": force,
+		"device": device,
+		"out_dir": out_dir,
+		"expert": expert,
+		"opt_extra_kwargs": opt_extra_kwargs,
+	}
+
+
+def pretrain_fingerprint_payload(config: dict[str, Any]) -> dict[str, Any]:
+	from compute_results.constants import PRETRAIN_FINGERPRINT_EXCLUDE_KEYS
+
+	return {k: v for k, v in config.items() if k not in PRETRAIN_FINGERPRINT_EXCLUDE_KEYS}
+
+
+def compute_pretrain_fingerprint(config: dict[str, Any]) -> str:
+	payload = pretrain_fingerprint_payload(config)
+	canonical = json.dumps(payload, sort_keys=True, default=str)
+	return hashlib.sha256(canonical.encode()).hexdigest()
+
+
+def build_pretrain_config(
+	*,
+	model_class: str,
+	model_config: dict[str, Any],
+	activation: str,
+	optimizer_names: list[str],
+	base_lr: float,
+	batch_size: int,
+	he_init: int | str | float,
+	init_epsilon: float,
+	dataset_seed: int,
+	model_seeds: list[int],
+	train_k_samples: int,
+	threshold_acc: float,
+	max_epochs: int,
+	data_root: str,
+	expert: bool,
+	opt_extra_kwargs: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+	config: dict[str, Any] = {
+		"model_class": model_class,
+		"model_config": model_config,
+		"activation": activation,
+		"optimizer": optimizer_names,
+		"base_lr": base_lr,
+		"batch_size": batch_size,
+		"he_init": he_init,
+		"init_epsilon": init_epsilon,
+		"dataset_seed": dataset_seed,
+		"multi_seeds": list(model_seeds),
+		"train_k_samples": train_k_samples,
+		"threshold_acc": threshold_acc,
+		"max_epochs": max_epochs,
+		"data_root": data_root,
+		"expert": expert,
+		"opt_extra_kwargs": dict(opt_extra_kwargs or {}),
+	}
+	config["pretrain_config_fingerprint"] = compute_pretrain_fingerprint(config)
+	return config
+
+
+def validate_pretrain_config_constraints(
+	config: dict[str, Any],
+	*,
+	out_dir: str,
+	save: bool,
+	model_seeds: list[int],
+) -> None:
+	from models import parse_he_init
+
+	pk = int(config["train_k_samples"])
+	if pk < 1:
+		raise ValueError(f"train_k_samples must be >= 1, got {pk}")
+	if pk % 10 != 0:
+		raise ValueError(f"train_k_samples must be divisible by 10, got {pk}")
+
+	ta = float(config["threshold_acc"])
+	if not (0.0 < ta <= 1.0):
+		raise ValueError(f"threshold_acc must be in (0, 1], got {ta}")
+
+	if int(config["max_epochs"]) < 1:
+		raise ValueError(f"max_epochs must be >= 1, got {config['max_epochs']}")
+
+	if "!OPT" not in out_dir:
+		raise ValueError("out_dir must contain the placeholder '!OPT'.")
+
+	if save and len(model_seeds) > 1 and "!SD" not in out_dir:
+		raise ValueError("SAVE with multiple model_seeds requires '!SD' in out_dir.")
+
+	if float(config["init_epsilon"]) < 0:
+		raise ValueError("init_epsilon must be non-negative.")
+
+	parse_he_init(config["he_init"])
+
+
+def guard_pretrain_output(save_root: Path, config: dict[str, Any], *, force: bool) -> bool:
+	"""Validate stored pretrain config against *config*.
+
+	Returns True if the run should be skipped (matching outputs already on disk).
+	Raises ConfigConflictError on fingerprint mismatch (never overridable with --force).
+	"""
+	config_path = save_root / "pretrain_config.json"
+	model_path = save_root / "model.pt"
+	if not model_path.exists():
+		return False
+	if not config_path.exists():
+		if force:
+			return False
+		raise ConfigConflictError(
+			f"Output exists at {save_root} (model.pt) but no pretrain_config.json; "
+			"use --force to overwrite."
+		)
+
+	stored = dict(json.loads(config_path.read_text()))
+	if pretrain_fingerprint_payload(config) == pretrain_fingerprint_payload(stored):
+		return not force
+
+	diffs: list[str] = []
+	pin = pretrain_fingerprint_payload(config)
+	pst = pretrain_fingerprint_payload(stored)
+	for k in sorted(set(pin) | set(pst)):
+		v_in = pin.get(k)
+		v_st = pst.get(k)
+		if v_in != v_st:
+			diffs.append(f"  {k}: incoming={v_in!r}  stored={v_st!r}")
+	msg = (
+		f"Incoming pretrain config conflicts with stored config at {config_path}:\n"
+		+ "\n".join(diffs)
+		+ "\nConfig mismatches cannot be overridden with --force."
+	)
+	raise ConfigConflictError(msg)
+
+
+def save_pretrain_config(save_root: Path, config: dict[str, Any]) -> None:
+	save_root.mkdir(parents=True, exist_ok=True)
+	(save_root / "pretrain_config.json").write_text(
+		json.dumps(config, indent=2, default=str) + "\n"
+	)
+
+
+def build_pretrain_report(
+	*,
+	pretrain_config: dict[str, Any],
+	training_result: dict[str, Any],
+	model_seed: int,
+	optimizer_name: str,
+	optimizer_class: str,
+	optimizer_id: str,
+) -> dict[str, Any]:
+	"""Build a human-readable run summary for ``report.json``."""
+	config = pretrain_fingerprint_payload(pretrain_config)
+	return {
+		"model_class": pretrain_config["model_class"],
+		"model_config": dict(pretrain_config["model_config"]),
+		"model_seed": model_seed,
+		"optimizer_name": optimizer_name,
+		"optimizer_class": optimizer_class,
+		"optimizer_id": optimizer_id,
+		"run": {
+			"total_iterations": int(training_result["steps"]),
+			"phase_a_epochs": int(training_result.get("phase_a_epochs", 0)),
+			"crossing_epoch": training_result.get("crossing_epoch"),
+			"step_in_crossing_epoch": training_result.get("step_in_crossing_epoch"),
+			"reached_threshold": bool(training_result.get("reached", False)),
+			"final_train_loss": training_result.get("final_train_loss"),
+			"final_test_loss": training_result.get("final_test_loss"),
+			"final_test_acc": training_result.get("final_test_acc"),
+		},
+		"config": config,
+	}
+
+
+def load_pretrain_report(save_root: Path) -> dict[str, Any]:
+	"""Load ``report.json`` from a pretrain checkpoint directory."""
+	return json.loads((save_root / "report.json").read_text())
+
+
+def save_pretrain_report(save_root: Path, report: dict[str, Any]) -> None:
+	save_root.mkdir(parents=True, exist_ok=True)
+	(save_root / "report.json").write_text(
+		json.dumps(report, indent=2, default=str) + "\n"
+	)

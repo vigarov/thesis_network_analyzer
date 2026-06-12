@@ -30,3 +30,27 @@ INITIAL_MODEL_CHECKPOINT_FILENAMES: tuple[str, ...] = ("model.pt", "model.pth")
 
 # Required optimizer state filename inside each `use_initial_model` bundle subfolder.
 INITIAL_MODEL_OPTIMIZER_STATE_FILENAME = "optimizer.pt"
+
+# Default model weight-init seeds when `--multi_seeds` is passed without a value.
+DEFAULT_MULTI_SEEDS: list[int] = [6, 7, 14, 30, 31, 35, 51, 68, 90, 96]
+
+# Keys omitted from pretrain config fingerprint and equality checks.
+PRETRAIN_FINGERPRINT_EXCLUDE_KEYS = frozenset(
+	{
+		"device",
+		"save",
+		"force",
+		"out_dir",
+		"pretrain_config_fingerprint",
+	}
+)
+
+# Sentinel for argparse: bare ``--multi_seeds`` (no CSV value).
+MULTI_SEEDS_USE_DEFAULT = "__DEFAULT_MULTI_SEEDS__"
+
+# Threshold-based pretraining defaults (see compute_results/pretrain.py).
+BS_LINEAR_BRACKET_THRESHOLD = 80
+DEFAULT_TRAIN_K_SAMPLES = 1000
+DEFAULT_THRESHOLD_ACC = 0.8
+EXPERT_TRAIN_K_SAMPLES = 20000
+EXPERT_THRESHOLD_ACC = 0.95

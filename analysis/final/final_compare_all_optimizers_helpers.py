@@ -399,8 +399,8 @@ def collect_final_run_data(
 		expert_saliency = expert_saliency_by_oid[oid]
 		missing = [nid for nid in required_nids if nid not in expert_saliency]
 		if missing:
-			expert_meta = torch.load(expert_dir / "train_meta.pt", map_location="cpu", weights_only=True)
-			expert_model = get_model(expert_meta["MODEL_TYPE"], **expert_meta["MODEL_CONFIG"]).to(device)
+			report = json.loads((expert_dir / "report.json").read_text())
+			expert_model = get_model(report["model_class"], **report["model_config"]).to(device)
 			expert_model.load_state_dict(torch.load(expert_dir / "model.pt", map_location="cpu", weights_only=True))
 			expert_model.eval()
 			all_expert_saliency_maps = get_all_model_saliency_maps(expert_model, eval_digits, device)
@@ -411,8 +411,8 @@ def collect_final_run_data(
 			if torch.cuda.is_available():
 				torch.cuda.empty_cache()
 	else:
-		expert_meta = torch.load(expert_dir / "train_meta.pt", map_location="cpu", weights_only=True)
-		expert_model = get_model(expert_meta["MODEL_TYPE"], **expert_meta["MODEL_CONFIG"]).to(device)
+		report = json.loads((expert_dir / "report.json").read_text())
+		expert_model = get_model(report["model_class"], **report["model_config"]).to(device)
 		expert_model.load_state_dict(torch.load(expert_dir / "model.pt", map_location="cpu", weights_only=True))
 		expert_model.eval()
 		all_expert_saliency_maps = get_all_model_saliency_maps(expert_model, eval_digits, device)
