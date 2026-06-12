@@ -9,4 +9,3 @@ from experiments.base import (
 )
 
 import experiments.mnist  # noqa: F401  - triggers registration
-import experiments_new.mnist  # noqa: F401
