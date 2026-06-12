@@ -430,7 +430,7 @@ def _build_loss(
 ) -> go.Figure:
 	fig = go.Figure()
 	first_m = next(
-		(_metrics(eid, mid, o, rid=rid) for o in oids if _metrics(eid, mid, o, rid=rid)),
+		(_metrics(eid, mid, o, rid=rid, cache=_cache) for o in oids if _metrics(eid, mid, o, rid=rid, cache=_cache)),
 		{},
 	)
 	tags = [str(t) for t in first_m.get("checkpoint_tags", [])]
@@ -438,7 +438,7 @@ def _build_loss(
 	use_iter = cp_iters is not None and len(cp_iters) == len(tags)
 
 	for oid in oids:
-		m = _metrics(eid, mid, oid, rid=rid)
+		m = _metrics(eid, mid, oid, rid=rid, cache=_cache)
 		if not m:
 			continue
 		m_tags = [str(t) for t in m.get("checkpoint_tags", [])]
@@ -531,7 +531,7 @@ def _build_acc(
 ) -> go.Figure:
 	fig = go.Figure()
 	first_m = next(
-		(_metrics(eid, mid, o, rid=rid) for o in oids if _metrics(eid, mid, o, rid=rid)),
+		(_metrics(eid, mid, o, rid=rid, cache=_cache) for o in oids if _metrics(eid, mid, o, rid=rid, cache=_cache)),
 		{},
 	)
 	tags = [str(t) for t in first_m.get("checkpoint_tags", [])]
@@ -539,7 +539,7 @@ def _build_acc(
 	use_iter = cp_iters is not None and len(cp_iters) == len(tags)
 
 	for oid in oids:
-		m = _metrics(eid, mid, oid, rid=rid)
+		m = _metrics(eid, mid, oid, rid=rid, cache=_cache)
 		if not m:
 			continue
 		m_tags = [str(t) for t in m.get("checkpoint_tags", [])]
@@ -1207,9 +1207,9 @@ def _build_neuron_detail_figure(
 	"""Build one combined figure: 10-digit activation grid (one trace per eval sample, K=5),
 	then shared x-axis rows for dw/w, grad norm, cosine sim, Adam / Shampoo / LR signals.
 	"""
-	nts = _nts(eid, mid, oid, rid=rid)
-	sigs = _sigs(eid, mid, oid, rid=rid)
-	metrics = _metrics(eid, mid, oid, rid=rid)
+	nts = _nts(eid, mid, oid, rid=rid, cache=_cache)
+	sigs = _sigs(eid, mid, oid, rid=rid, cache=_cache)
+	metrics = _metrics(eid, mid, oid, rid=rid, cache=_cache)
 	otype = _opt_type(oid)
 
 	tags = [str(t) for t in nts.get("checkpoint_tags", [])]
@@ -1645,8 +1645,8 @@ def _build_network_activation_figure(
 	else:
 		kv = [bool(x) for x in k_visible]
 
-	nts = _nts(eid, mid, oid, rid=rid)
-	metrics = _metrics(eid, mid, oid, rid=rid)
+	nts = _nts(eid, mid, oid, rid=rid, cache=_cache)
+	metrics = _metrics(eid, mid, oid, rid=rid, cache=_cache)
 	if post_nonlinearity:
 		A = _activation_sample_matrix_post_nl(nts, nid)
 	else:
@@ -2290,8 +2290,8 @@ def _build_dead_neuron_pre_nl_grid(
 	Batch layout matches `MNISTWrapper.evaluation_inputs` / checkpoint capture:
 	sample index `5*d + k` for digit `d` and eval-sample slot `k` in `{0..4}`.
 	"""
-	nts = _nts(eid, mid, oid, rid=rid)
-	metrics = _metrics(eid, mid, oid, rid=rid)
+	nts = _nts(eid, mid, oid, rid=rid, cache=_cache)
+	metrics = _metrics(eid, mid, oid, rid=rid, cache=_cache)
 	A = _activation_sample_matrix(nts, nid)
 
 	tags = [str(t) for t in nts.get("checkpoint_tags", [])]
@@ -2417,8 +2417,7 @@ app = Dash(
 
 def _serve_layout() -> html.Div:
 	"""Regenerate layout on each page load for a fresh results scan."""
-	_cache.pop(("__scan__",), None)
-	tree = scan_results()
+	tree = scan_results(cache=_cache, refresh=True)
 	exp_opts = [{"label": e, "value": e} for e in sorted(tree)]
 
 	return html.Div(
@@ -2762,7 +2761,7 @@ app.layout = _serve_layout
 def _cb_models(eid: str | None):
 	if not eid:
 		return [], None
-	tree = scan_results()
+	tree = scan_results(cache=_cache)
 	ms = sorted(tree.get(eid, {}))
 	opts = [{"label": m, "value": m} for m in ms]
 	return opts, (ms[0] if len(ms) == 1 else None)
@@ -2777,7 +2776,7 @@ def _cb_models(eid: str | None):
 def _cb_run(eid: str | None, mid: str | None):
 	if not eid or not mid:
 		return [], None
-	tree = scan_results()
+	tree = scan_results(cache=_cache)
 	runs = tree.get(eid, {}).get(mid, {})
 	rids = _sorted_run_ids(runs)
 	if not rids:
@@ -2815,7 +2814,7 @@ def _cb_training(eid: str | None, mid: str | None, rid: str | None):
 			[],
 			None,
 		)
-	tree = scan_results()
+	tree = scan_results(cache=_cache)
 	oids = tree.get(eid, {}).get(mid, {}).get(rid, [])
 	if not oids:
 		return (
@@ -2850,8 +2849,8 @@ def _cb_slider(
 ):
 	if not eid or not mid or rid is None or not oid:
 		return 0, {}, 0, True, 1, None
-	nts = _nts(eid, mid, oid, rid=rid)
-	metrics = _metrics(eid, mid, oid, rid=rid)
+	nts = _nts(eid, mid, oid, rid=rid, cache=_cache)
+	metrics = _metrics(eid, mid, oid, rid=rid, cache=_cache)
 	tags = [str(t) for t in nts.get("checkpoint_tags", [])]
 	n = len(tags)
 	if n == 0:
@@ -3088,18 +3087,18 @@ def _cb_diagram(
 ):
 	if eid is None or mid is None or rid is None:
 		return _empty("Select an experiment, model & run to view architecture", 200), None
-	tree = scan_results()
+	tree = scan_results(cache=_cache)
 	oids_avail = tree.get(eid, {}).get(mid, {}).get(rid, [])
 	if not oids_avail:
 		return _empty("No data available", 200), None
 	ref_oid = oid if oid else oids_avail[0]
-	nts = _nts(eid, mid, ref_oid, rid=rid)
+	nts = _nts(eid, mid, ref_oid, rid=rid, cache=_cache)
 	units = _parse_units(nts)
 	n_cp = len(nts.get("checkpoint_tags", []))
-	m = _metrics(eid, mid, ref_oid, rid=rid)
+	m = _metrics(eid, mid, ref_oid, rid=rid, cache=_cache)
 	cp_iters = m.get("checkpoint_iterations") if m else None
 
-	df_dead = _pp_dead(eid, mid, ref_oid, rid=rid) if oid else None
+	df_dead = _pp_dead(eid, mid, ref_oid, rid=rid, cache=_cache) if oid else None
 	gray_dead, ever_ppd = _ever_dead_and_ppd_for_diagram(df_dead)
 
 	def _fig_at_checkpoint(ci: int | None) -> go.Figure:
@@ -3280,7 +3279,7 @@ def _cb_neuron(
 			checklist_out,
 		)
 
-	nts = _nts(eid, mid, oid, rid=rid)
+	nts = _nts(eid, mid, oid, rid=rid, cache=_cache)
 	safe = nid.replace(":", "__")
 	if f"act__{safe}" not in nts:
 		return empty, hint_default, k_wrap_style, checklist_out

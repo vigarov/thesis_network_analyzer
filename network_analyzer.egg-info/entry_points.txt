@@ -1,3 +1,4 @@
 [console_scripts]
-compute = compute_results.run_simulation:main
+analyse = scripts.analyse_sim_results:main
+compute = scripts.run_simulation:main
 plot = visualize_webapp.app:main

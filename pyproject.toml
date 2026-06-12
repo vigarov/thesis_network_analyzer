@@ -45,7 +45,8 @@ torchvision = [
 torch-shampoo = { git = "https://github.com/facebookresearch/optimizers.git" }
 
 [project.scripts]
-compute = "compute_results.run_simulation:main"
+compute = "scripts.run_simulation:main"
+analyse = "scripts.analyse_sim_results:main"
 plot = "visualize_webapp.app:main"
 
 [tool.uv]
@@ -54,10 +55,12 @@ package = true
 [tool.setuptools.packages.find]
 where = ["."]
 include = [
+  "analysis*",
   "compute_results*",
   "experiments*",
   "models*",
   "optimizers*",
+  "scripts*",
   "visualize_webapp*",
 ]
 

@@ -1,9 +1,9 @@
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pandas as pd
 
-from visualize_webapp.cache import _cache
 from visualize_webapp.common import _sort_optimizer_ids
 from visualize_webapp.constants import RESULTS
 
@@ -13,58 +13,107 @@ def _optimizer_npz_path(eid: str, rid: str, mid: str, oid: str, fname: str) -> P
 
 
 def _npz(
-	eid: str, mid: str, oid: str, fname: str, *, rid: str, w_cache: bool = True
+	eid: str,
+	mid: str,
+	oid: str,
+	fname: str,
+	*,
+	rid: str,
+	w_cache: bool = True,
+	cache: dict[tuple, Any] | None = None,
 ) -> dict[str, np.ndarray]:
 	key = (fname, eid, rid, mid, oid)
-	if key in _cache:
-		return _cache[key]
+	if cache is not None and key in cache:
+		return cache[key]
 	path = _optimizer_npz_path(eid, rid, mid, oid, fname)
 	if not path.exists():
 		return {}
 	data = dict(np.load(str(path), allow_pickle=True))
-	if w_cache:
-		_cache[key] = data
+	if w_cache and cache is not None:
+		cache[key] = data
 	return data
 
 # `pp` stands for post-processing
 # See compute_results/post_processing.py
 
 def _pp_csv(
-	eid: str, mid: str, oid: str, fname: str, *, rid: str, w_cache: bool = True
+	eid: str,
+	mid: str,
+	oid: str,
+	fname: str,
+	*,
+	rid: str,
+	w_cache: bool = True,
+	cache: dict[tuple, Any] | None = None,
 ) -> pd.DataFrame | None:
 	key = ("__pp_csv__", fname, eid, rid, mid, oid)
-	if key in _cache:
-		return _cache[key]
+	if cache is not None and key in cache:
+		return cache[key]
 	path = _optimizer_npz_path(eid, rid, mid, oid, fname)
 	if not path.exists():
-		_cache[key] = None
+		if cache is not None:
+			cache[key] = None
 		return None
 	df = pd.read_csv(str(path))
-	if w_cache:
-		_cache[key] = df
+	if w_cache and cache is not None:
+		cache[key] = df
 	return df
 
 
 def _pp_neuron_digit(
-	e: str, m: str, o: str, *, rid: str, w_cache: bool = True
+	e: str,
+	m: str,
+	o: str,
+	*,
+	rid: str,
+	w_cache: bool = True,
+	cache: dict[tuple, Any] | None = None,
 ) -> pd.DataFrame | None:
-	return _pp_csv(e, m, o, "post_processing_neuron_digit.csv", rid=rid, w_cache=w_cache)
+	return _pp_csv(
+		e, m, o, "post_processing_neuron_digit.csv", rid=rid, w_cache=w_cache, cache=cache
+	)
 
 
-def _pp_dead(e: str, m: str, o: str, *, rid: str, w_cache: bool = True) -> pd.DataFrame | None:
-	return _pp_csv(e, m, o, "post_processing_dead.csv", rid=rid, w_cache=w_cache)
+def _pp_dead(
+	e: str, m: str, o: str, *, rid: str, w_cache: bool = True, cache: dict[tuple, Any] | None = None
+) -> pd.DataFrame | None:
+	return _pp_csv(e, m, o, "post_processing_dead.csv", rid=rid, w_cache=w_cache, cache=cache)
 
 
-def _metrics(e: str, m: str, o: str, *, rid: str, w_cache: bool = True) -> dict[str, np.ndarray]:
-	return _npz(e, m, o, "training_metrics.npz", rid=rid, w_cache=w_cache)
+def _metrics(
+	e: str,
+	m: str,
+	o: str,
+	*,
+	rid: str,
+	w_cache: bool = True,
+	cache: dict[tuple, Any] | None = None,
+) -> dict[str, np.ndarray]:
+	return _npz(e, m, o, "training_metrics.npz", rid=rid, w_cache=w_cache, cache=cache)
 
 
-def _nts(e: str, m: str, o: str, *, rid: str, w_cache: bool = True) -> dict[str, np.ndarray]:
-	return _npz(e, m, o, "neuron_timeseries.npz", rid=rid, w_cache=w_cache)
+def _nts(
+	e: str,
+	m: str,
+	o: str,
+	*,
+	rid: str,
+	w_cache: bool = True,
+	cache: dict[tuple, Any] | None = None,
+) -> dict[str, np.ndarray]:
+	return _npz(e, m, o, "neuron_timeseries.npz", rid=rid, w_cache=w_cache, cache=cache)
 
 
-def _sigs(e: str, m: str, o: str, *, rid: str, w_cache: bool = True) -> dict[str, np.ndarray]:
-	return _npz(e, m, o, "signals.npz", rid=rid, w_cache=w_cache)
+def _sigs(
+	e: str,
+	m: str,
+	o: str,
+	*,
+	rid: str,
+	w_cache: bool = True,
+	cache: dict[tuple, Any] | None = None,
+) -> dict[str, np.ndarray]:
+	return _npz(e, m, o, "signals.npz", rid=rid, w_cache=w_cache, cache=cache)
 
 
 def _oids_from_optimizers_dir(opt_base: Path) -> list[str]:
@@ -79,18 +128,24 @@ def _oids_from_optimizers_dir(opt_base: Path) -> list[str]:
 	)
 
 
-def scan_results() -> dict[str, dict[str, dict[str, list[str]]]]:
+def scan_results(
+	*,
+	cache: dict[tuple, Any] | None = None,
+	w_cache: bool = True,
+	refresh: bool = False,
+) -> dict[str, dict[str, dict[str, list[str]]]]:
 	"""Return ``{experiment_id: {model_id: {run_id: [optimizer_id, …]}}}``.
 
 	Layout: ``results/<experiment_id>/<run_id>/<model_id>/optimizers/<optimizer_id>/``.
 	"""
 	key = ("__scan__",)
-	if key in _cache:
-		return _cache[key]
+	if not refresh and w_cache and cache is not None and key in cache:
+		return cache[key]
 
 	tree: dict[str, dict[str, dict[str, list[str]]]] = {}
 	if not RESULTS.exists():
-		_cache[key] = tree
+		if w_cache and cache is not None:
+			cache[key] = tree
 		return tree
 
 	for exp_dir in sorted(RESULTS.iterdir()):
@@ -113,5 +168,6 @@ def scan_results() -> dict[str, dict[str, dict[str, list[str]]]]:
 					tree.setdefault(eid, {}).setdefault(mid, {})
 					tree[eid][mid][rid] = oids
 
-	_cache[key] = tree
+	if w_cache and cache is not None:
+		cache[key] = tree
 	return tree
