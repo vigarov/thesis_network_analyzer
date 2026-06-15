@@ -2,10 +2,10 @@
 # Usage: bash scripts/slurm/pretrain.sh [--auto-sync [SECONDS]]
 
 #SBATCH --job-name=net-pretrain
-#SBATCH --time=01:00:00
+#SBATCH --time=02:00:00
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=4
-#SBATCH --mem=10G
+#SBATCH --mem=20G
 
 if [[ -z "${SLURM_JOB_ID:-}" && "${BASH_SOURCE[0]}" == "${0}" ]]; then
 	set -euo pipefail
