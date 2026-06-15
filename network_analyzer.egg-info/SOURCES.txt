@@ -25,7 +25,6 @@ compute_results/constants.py
 compute_results/defaults.py
 compute_results/post_processing.py
 compute_results/pretrain.py
-compute_results/train_logging.py
 compute_results/training_loop.py
 experiments/__init__.py
 experiments/base.py
@@ -65,9 +64,10 @@ optimizers/pure_shampoo_extractor.py
 optimizers/sgd_extractor.py
 scripts/__init__.py
 scripts/analyse_sim_results.py
-scripts/cluster_utils.py
 scripts/pretrain_models.py
 scripts/run_simulation.py
+scripts/utils/__init__.py
+scripts/utils/cluster_utils.py
 visualize_webapp/__init__.py
 visualize_webapp/app.py
 visualize_webapp/cache.py

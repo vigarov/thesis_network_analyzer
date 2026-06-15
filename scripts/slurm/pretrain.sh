@@ -4,6 +4,7 @@
 #SBATCH --job-name=net-pretrain
 #SBATCH --time=02:00:00
 #SBATCH --gpus=1
+#SBATCH --partition=gpu_rtx6000_24gb
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=20G
 
