@@ -42,13 +42,13 @@ explicit = true
 torch = [
   { index = "pytorch-cu130", marker = "sys_platform == 'linux'" },
 ]
-#torch-cpu = [
+#torch = [ # Use for CPU-only
 #  { index = "pytorch-cpu", marker = "sys_platform == 'linux'" },
 #]
 torchvision = [
   { index = "pytorch-cu130", marker = "sys_platform == 'linux'" },
 ]
-#torchvision-cpu = [
+#torchvision = [ # Use for CPU-only
 #  { index = "pytorch-cpu", marker = "sys_platform == 'linux'" },
 #]
 torch-shampoo = { git = "https://github.com/facebookresearch/optimizers.git" }
