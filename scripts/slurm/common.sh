@@ -228,7 +228,7 @@ _sbatch_with_logs() {
 		stage="$(_slurm_stage_from_script "${script_path}")"
 	fi
 
-	local -a sbatch_args=(--parsable --account="${SLURM_ACCOUNT}")
+	local -a sbatch_args=(--parsable --account="${SLURM_ACCOUNT}" --chdir="${PROJECT_ROOT}")
 	mapfile -d '' -t _log_array_args < <(_sbatch_log_and_array_args "${script_path}" "${stage}")
 	sbatch_args+=("${_log_array_args[@]}")
 	if (($#)); then

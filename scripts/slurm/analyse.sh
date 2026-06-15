@@ -18,7 +18,8 @@ if [[ -z "${SLURM_JOB_ID:-}" && "${BASH_SOURCE[0]}" == "${0}" ]]; then
 fi
 # else (coming from _run_submit_wrapper):
 set -euo pipefail
-source "$(dirname "${BASH_SOURCE[0]}")/common.sh" # Load the common functions
+# Slurm runs a copy under /var/spool/slurmd/...; source via --chdir=PROJECT_ROOT from common.sh.
+source scripts/slurm/common.sh
 
 ANALYSE_ARGS=(
 	--input-dir "${RESULTS_DIR}"

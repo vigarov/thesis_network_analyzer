@@ -21,7 +21,8 @@ if [[ -z "${SLURM_JOB_ID:-}" && "${BASH_SOURCE[0]}" == "${0}" ]]; then
 fi
 # else (coming from _run_submit_wrapper):
 set -euo pipefail
-source "$(dirname "${BASH_SOURCE[0]}")/common.sh" # Load the common functions
+# Slurm runs a copy under /var/spool/slurmd/...; source via --chdir=PROJECT_ROOT from common.sh.
+source scripts/slurm/common.sh
 require_array_task_id
 
 CONFIG="$(config_for_array_task "${SLURM_ARRAY_TASK_ID}")"
