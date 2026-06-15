@@ -6,6 +6,7 @@
 
 #SBATCH --job-name=net-analyse
 #SBATCH --time=24:00:00
+#SBATCH --gpus=1
 #SBATCH --cpus-per-task=32
 #SBATCH --mem=48G
 
