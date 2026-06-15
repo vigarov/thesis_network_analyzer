@@ -104,16 +104,18 @@ def _scalar_from_signal_row(sigs: dict, oid: str, neuron_id: str, row_idx: int) 
 		return float(arr[row_idx])
 
 	if otype == "adam":
-		if "exp_avg_sq_norm" not in sigs:
+		key = f"exp_avg_sq__{safe}"
+		if key not in sigs:
 			return float("nan")
-		arr = sigs["exp_avg_sq_norm"]
+		arr = sigs[key]
 		if row_idx >= len(arr):
 			return float("nan")
-		col = _unit_col_idx(sigs, neuron_id)
-		if arr.ndim != 2 or col < 0:
-			return float("nan")
-		vnorm = float(arr[row_idx, col])
-		return lr / (vnorm + DEFAULT_ADAM_EPS)
+		val = arr[row_idx]
+		# TODO: make per parameter analysis
+		if isinstance(val, np.ndarray):
+			v = np.sqrt(np.nanmean(val))
+			return lr / (float(v) + DEFAULT_ADAM_EPS)
+		return lr / (float(val) + DEFAULT_ADAM_EPS)
 
 	return float("nan")
 

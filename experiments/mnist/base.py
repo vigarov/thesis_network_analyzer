@@ -17,6 +17,8 @@ from torchvision import datasets, transforms
 
 from experiments.base import Experiment
 
+DATA_ROOT = "./data"
+
 
 def label_to_int(y: int | torch.Tensor) -> int:
 	return int(y.item()) if isinstance(y, torch.Tensor) else int(y)
@@ -107,8 +109,9 @@ class MNISTWrapper(Experiment):
 
 	def _ensure_datasets(self):
 		"""Load MNIST train/test sets, normalizing both with train-set stats."""
+		data_root = DATA_ROOT
 		raw_train = datasets.MNIST(
-			root="./data", train=True, download=True,
+			root=data_root, train=True, download=True,
 			transform=transforms.ToTensor(),
 		)
 		pixels = raw_train.data.float() / 255.0
@@ -121,10 +124,10 @@ class MNISTWrapper(Experiment):
 		])
 
 		full_train = datasets.MNIST(
-			root="./data", train=True, download=True, transform=tfm,
+			root=data_root, train=True, download=True, transform=tfm,
 		)
 		self._test_ds = datasets.MNIST(
-			root="./data", train=False, download=True, transform=tfm,
+			root=data_root, train=False, download=True, transform=tfm,
 		)
 
 		# Eval inputs for activations: last 5 per digit (0 .. N_DIGITS-1) from train.

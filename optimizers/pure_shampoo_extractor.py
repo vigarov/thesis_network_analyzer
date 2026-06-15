@@ -2,13 +2,15 @@
 
 Per-unit signals (gradient signals inherited from base):
 - grad_norm, grad_cosine_sim
-- h_inv_norm: global ||L^{-1/4} ⊗ R^{-1/4}||_F computed from
-  per-block Kronecker factor inverse matrices.  Because
-  ||A ⊗ B||_F = ||A||_F · ||B||_F, the overall norm is the
-  vector norm of per-block products.
+- h_inv_norm: ||L^{-1/4} ⊗ R^{-1/4}||_F derived from saved inverse-factor blocks
+
+Layer-wise block signals (via on_after_step_shampoo_blocks):
+- h_inv__{param}__L / __R: inverse Kronecker factor matrices (paper notation)
+  for each preconditioned parameter (weights and biases).
 """
 from typing import Any
 
+import numpy as np
 import torch
 import torch.nn as nn
 
@@ -26,31 +28,87 @@ from distributed_shampoo.shampoo_types import SHAMPOO_PRECONDITIONER_LIST, Singl
 
 from optimizers.base import OptimizerSignalExtractor, register_extractor
 
+_SHAMPOO_FACTOR_SUFFIXES = ("L", "R")
 
-def _compute_h_inv_norm(optimizer: DistributedShampoo) -> float:
-	"""||L^{-1/4} ⊗ R^{-1/4}||_F across all parameter blocks.
 
-	For each block the Kronecker-product Frobenius norm factors as
-	the product of per-factor Frobenius norms.  The global norm is
-	the vector-2-norm of these per-block scalars.
+def _param_names_in_optimizer_order(
+	model: nn.Module, optimizer: torch.optim.Optimizer,
+) -> list[str]:
+	param_to_name = {id(p): name for name, p in model.named_parameters()}
+	names: list[str] = []
+	for group in optimizer.param_groups:
+		for param in group["params"]:
+			names.append(param_to_name.get(id(param), f"param_{len(names)}"))
+	return names
+
+
+def _h_inv_norm_from_blocks(blocks: dict[str, np.ndarray]) -> float:
+	"""Global Frobenius norm from per-parameter block products.
+
+	Keys are `h_inv__{param}__L` / `__R`; factors sharing a parameter prefix
+	belong to one Kronecker block.  Because ||A ⊗ B||_F = ||A||_F · ||B||_F, the
+	per-parameter norm is the product of factor Frobenius norms; the global
+	norm is the vector-2-norm of those scalars.
 	"""
-	per_block_norms = []
+	per_param_norms: list[float] = []
+	prefixes: set[str] = set()
+	for key in blocks:
+		for suffix in _SHAMPOO_FACTOR_SUFFIXES:
+			if key.endswith(f"__{suffix}"):
+				prefixes.add(key[: -len(suffix) - 2])
+				break
+		else:
+			prefixes.add(key)
+	for prefix in sorted(prefixes):
+		block_norm = 1.0
+		for suffix in _SHAMPOO_FACTOR_SUFFIXES:
+			mat = blocks.get(f"{prefix}__{suffix}")
+			if mat is not None:
+				block_norm *= float(np.linalg.norm(mat, ord="fro"))
+		per_param_norms.append(block_norm)
+	if not per_param_norms:
+		return float("nan")
+	return float(np.linalg.norm(np.asarray(per_param_norms, dtype=np.float32)))
+
+
+def _extract_h_inv_blocks(
+	optimizer: DistributedShampoo, model: nn.Module,
+) -> tuple[dict[str, np.ndarray], float]:
+	"""Extract inverse-factor matrices and derive the global h_inv norm.
+
+	Returns `(blocks, h_inv_norm)` where each block is float32 on CPU with
+	shape `(d, d)` and keys `h_inv__{safe_param}__L` / `__R`.
+	"""
+	blocks: dict[str, np.ndarray] = {}
+	param_names = _param_names_in_optimizer_order(model, optimizer)
+	name_idx = 0
+
 	for state_lists in optimizer._per_group_state_lists:
 		shampoo_list = state_lists[SHAMPOO_PRECONDITIONER_LIST]
-		for kf in shampoo_list._local_kronecker_factors_unwrapped:
+		kf_list = shampoo_list._local_kronecker_factors_unwrapped
+		for kf in kf_list:
+			param_name = (
+				param_names[name_idx]
+				if name_idx < len(param_names)
+				else f"param_{name_idx}"
+			)
+			name_idx += 1
+			safe = param_name.replace(".", "__")
 			inv_mats = getattr(kf, "inv_factor_matrices", None)
-			if inv_mats:
-				block_norm = 1.0
-				for mat in inv_mats:
-					block_norm *= torch.linalg.matrix_norm(
-						mat.detach().float(), ord="fro"
-					).item()
-				per_block_norms.append(block_norm)
-	if not per_block_norms:
-		return float("nan")
-	return torch.linalg.vector_norm(
-		torch.tensor(per_block_norms, dtype=torch.float32)
-	).item()
+			if not inv_mats:
+				continue
+			for fi, mat in enumerate(inv_mats):
+				suffix = (
+					_SHAMPOO_FACTOR_SUFFIXES[fi]
+					if fi < len(_SHAMPOO_FACTOR_SUFFIXES)
+					else f"f{fi}"
+				)
+				blocks[f"h_inv__{safe}__{suffix}"] = (
+					mat.detach().float().cpu().numpy()
+				)
+
+	h_inv_norm = _h_inv_norm_from_blocks(blocks)
+	return blocks, h_inv_norm
 
 
 @register_extractor
@@ -68,6 +126,7 @@ class PureShampooExtractor(OptimizerSignalExtractor):
 		self.lr = lr
 		self.betas = betas
 		self.shampoo_preconditioner_epsilon = shampoo_preconditioner_epsilon
+		self._pending_block_signals: dict[str, np.ndarray] = {}
 
 	def optimizer_id(self) -> str:
 		return f"pure_shampoo_lr{self.lr}"
@@ -98,7 +157,7 @@ class PureShampooExtractor(OptimizerSignalExtractor):
 		)
 
 	def signal_names(self) -> list[str]:
-		return ["grad_norm", "grad_cosine_sim", "h_inv_norm"]
+		return ["grad", "grad_norm", "grad_cosine_sim", "h_inv_norm"]
 
 	def on_before_step(
 		self, model: nn.Module, optimizer: torch.optim.Optimizer,
@@ -109,7 +168,13 @@ class PureShampooExtractor(OptimizerSignalExtractor):
 		self, model: nn.Module, optimizer: torch.optim.Optimizer,
 	) -> dict[str, dict[str, float]]:
 		assert isinstance(optimizer, DistributedShampoo)
-		h_inv = _compute_h_inv_norm(optimizer)
+		blocks, h_inv = _extract_h_inv_blocks(optimizer, model)
+		self._pending_block_signals = blocks
 		return {
 			"h_inv_norm": {u["node_id"]: h_inv for u in self._units},
 		}
+
+	def on_after_step_blocks(
+		self, model: nn.Module, optimizer: torch.optim.Optimizer,
+	) -> dict[str, np.ndarray]:
+		return dict(self._pending_block_signals)

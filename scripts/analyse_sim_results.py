@@ -4,9 +4,6 @@ Reads run_simulation.py artifacts from `--input-dir` (same layout as
 `results/<experiment_id>/<run_id>/<model_id>/optimizers/<optimizer_id>/`),
 writes gzip-pickled checkpoints under `--output-dir`.
 """
-
-from __future__ import annotations
-
 import argparse
 import json
 import sys
@@ -30,6 +27,7 @@ from analysis.final.final_compare_all_optimizers_helpers import (
 	rescore_final_run,
 )
 from analysis.io import scan_results
+from scripts.utils.cluster_utils import add_output_dir_argument
 
 DEFAULT_SCORE_FACTORS: dict[str, float] = {
 	"angle_score": 1.0,
@@ -61,11 +59,10 @@ def build_parser() -> argparse.ArgumentParser:
 		required=True,
 		help="Root directory of simulation results (experiment/run/model tree).",
 	)
-	p.add_argument(
-		"--output-dir",
-		type=Path,
-		required=True,
+	add_output_dir_argument(
+		p,
 		help="Directory for gzip-pickled analysis checkpoints.",
+		required=True,
 	)
 	p.add_argument(
 		"--expert-model-dir",

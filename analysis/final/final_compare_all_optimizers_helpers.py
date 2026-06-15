@@ -393,7 +393,7 @@ def collect_final_run_data(
 	_, prebuilt_pyramids = init_cw_ssim_pyramid(device, prebuilt_pyramids)
 
 	required_nids = list(recovery_periods["neuron_id"].unique())
-	expert_dir = root / expert_model_dir.replace("!OPT", oid.replace("grafted", "graft")).replace("adam_lr0.01", "adam_lr0.0005").replace("adam_lr0.001", "adam_lr0.0005")
+	expert_dir = root / expert_model_dir.replace("!OPT", oid)
 	expert_saliency: dict
 	if expert_saliency_by_oid is not None and oid in expert_saliency_by_oid:
 		expert_saliency = expert_saliency_by_oid[oid]

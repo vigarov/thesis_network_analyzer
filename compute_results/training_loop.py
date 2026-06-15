@@ -7,6 +7,7 @@ from tqdm import tqdm
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.utils.tensorboard import SummaryWriter
 
 from compute_results.checkpoint import (
 	NeuronTimeseriesCollector,
@@ -128,6 +129,7 @@ def _run_checkpoint(
 	criterion: nn.Module,
 	metrics: dict[str, list],
 	train_loss_accum: list[float],
+	train_logger: SummaryWriter | None = None,
 ) -> None:
 	"""Optionally save .pt weights; always capture activations, metrics, evaluate."""
 	model.eval()
@@ -145,6 +147,9 @@ def _run_checkpoint(
 		loss, acc = evaluate(model, loader, device, criterion)
 		metrics.setdefault(f"loss_{loader_name}", []).append(loss)
 		metrics.setdefault(f"acc_{loader_name}", []).append(acc)
+		if train_logger is not None:
+			train_logger.add_scalar(f"eval/{loader_name}_loss", loss, iteration)
+			train_logger.add_scalar(f"eval/{loader_name}_acc", acc, iteration)
 
 	n_train = len(train_loss_accum)
 	if n_train > 0:
@@ -158,6 +163,10 @@ def _run_checkpoint(
 		train_se = float("nan")
 	metrics.setdefault("loss_all_train_mean", []).append(train_mean)
 	metrics.setdefault("loss_all_train_se", []).append(train_se)
+	if train_logger is not None:
+		train_logger.add_scalar("train/loss_mean", train_mean, iteration)
+		if not np.isnan(train_se):
+			train_logger.add_scalar("train/loss_se", train_se, iteration)
 	train_loss_accum.clear()
 
 	metrics.setdefault("checkpoint_tags", []).append(tag)
@@ -172,6 +181,7 @@ def train_with_config(
 	config: dict[str, Any],
 	device: torch.device,
 	results_dir: Path,
+	train_logger: SummaryWriter | None = None,
 ) -> None:
 	"""Run the full multi-trial training and save all outputs."""
 	model = model.to(device)
@@ -236,6 +246,7 @@ def train_with_config(
 		s: {nid: [] for nid in node_ids}
 		for s in extractor.signal_names()
 	}
+	shampoo_layer_block_signals: dict[str, list[np.ndarray]] = {}
 	iterations: list[int] = []
 
 	all_eval_loaders: dict[str, torch.utils.data.DataLoader] = {}
@@ -261,6 +272,7 @@ def train_with_config(
 		"criterion": criterion,
 		"metrics": metrics,
 		"train_loss_accum": train_loss_accum,
+		"train_logger": train_logger,
 	}
 
 	_run_checkpoint(tag="init", iteration=0, **_run_cp_kwargs)
@@ -313,6 +325,8 @@ def train_with_config(
 					loss = criterion(logits, y)
 					loss.backward()
 					train_loss_accum.append(loss.item())
+					if train_logger is not None:
+						train_logger.add_scalar("train/loss", loss.item(), global_iter)
 
 					before_signals = extractor.on_before_step(model, optimizer)
 					optimizer.step()
@@ -325,6 +339,10 @@ def train_with_config(
 							signal_log[s_name][nid].append(
 								unit_vals.get(nid, float("nan"))
 							)
+					for bk, mat in extractor.on_after_step_shampoo_blocks(
+						model, optimizer,
+					).items():
+						shampoo_layer_block_signals.setdefault(bk, []).append(mat)
 					iterations.append(global_iter)
 					global_iter += 1
 
@@ -400,6 +418,11 @@ def train_with_config(
 				[np.array(unit_data[nid]) for nid in node_ids]
 			)
 			signal_arrays[s_name] = matrix
+	for bk, series in shampoo_layer_block_signals.items():
+		if not series:
+			signal_arrays[bk] = np.array([])
+		else:
+			signal_arrays[bk] = np.stack(series)
 	np.savez_compressed(str(optimizer_dir / "signals.npz"), **signal_arrays)
 
 	neuron_collector.save(optimizer_dir / "neuron_timeseries.npz")

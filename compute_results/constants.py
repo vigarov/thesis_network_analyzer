@@ -45,8 +45,8 @@ PRETRAIN_FINGERPRINT_EXCLUDE_KEYS = frozenset(
 	}
 )
 
-# Sentinel for argparse: bare ``--multi_seeds`` (no CSV value).
-MULTI_SEEDS_USE_DEFAULT = "__DEFAULT_MULTI_SEEDS__"
+# Sentinel for argparse: bare `--multi_seeds` (no CSV value).
+MULTI_SEEDS_USE_DEFAULT = "<DEFAULT_MULTI_SEEDS>"
 
 # Threshold-based pretraining defaults (see compute_results/pretrain.py).
 BS_LINEAR_BRACKET_THRESHOLD = 80

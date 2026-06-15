@@ -818,10 +818,10 @@ _COSINE_SIM_SIGS: dict[str, list[tuple[str, str, str, bool]]] = {
 	"grafted_shampoo": [("grad_cosine_sim", "Grad cos. sim.", C["purple"], False)],
 }
 
-# Adam moments (exp_avg_norm, exp_avg_sq_norm) - only for Adam, two y axes
+# Adam moments (exp_avg, exp_avg_sq per-weight vectors) - only for Adam, two y axes
 _ADAM_MOMENTS_SIGS: list[tuple[str, str, str, bool]] = [
-	("exp_avg_norm", "1st moment norm", C["blue"], False),
-	("exp_avg_sq_norm", "2nd moment norm", C["orange"], True),  # secondary y
+	("exp_avg", "1st moment (mean)", C["blue"], False),
+	("exp_avg_sq", "2nd moment (mean)", C["orange"], True),  # secondary y
 ]
 
 # Adagrad / grafted Shampoo: effective step scale (per-weight LR-style)
@@ -1416,7 +1416,9 @@ def _build_neuron_detail_figure(
 	if has_adam_moments and ci >= 0:
 		r_adam = int(r_m)
 		for sname, slabel, scolor, sec_y in _ADAM_MOMENTS_SIGS:
-			y = _signal_at_checkpoints(sigs, sname, ci, x_iters)
+			y = _signal_at_checkpoints(
+				sigs, sname, ci, x_iters, unit_safe=safe,
+			)
 			_add_neuron_smoothed_series(
 				fig,
 				row=r_adam,
@@ -1513,9 +1515,9 @@ def _build_neuron_detail_figure(
 				secondary_y=True,
 			)
 	if has_adam_moments and r_adam is not None:
-		fig.update_yaxes(title_text="1st moment norm", row=r_adam, col=1)
+		fig.update_yaxes(title_text="1st moment (mean)", row=r_adam, col=1)
 		fig.update_yaxes(
-			title_text="2nd moment norm", row=r_adam, col=1, secondary_y=True
+			title_text="2nd moment (mean)", row=r_adam, col=1, secondary_y=True
 		)
 	if has_shampoo_h_inv and r_sh is not None:
 		fig.update_yaxes(title_text="Precond. inv. norm", row=r_sh, col=1)

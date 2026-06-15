@@ -3,7 +3,7 @@
 
 Results are written under:
 
-	`results/<experiment_id>/<result_id>/<model_id>/`
+	`<output-dir>/<experiment_id>/<result_id>/<model_id>/`
 
 where `result_id` is the first six hex characters of a SHA-256 fingerprint of the
 training config (with a numeric suffix if that prefix collides with a different config).
@@ -16,25 +16,32 @@ to union shorthands with all registered extractors.
 config mismatches against an existing `config.json` are never overridden; fix the
 config or use a different run directory (different training fingerprint).
 
+Paths:
+	--output-dir  Simulation results root (default: ./results)
+	--env-file    Dotenv with WANDB_* keys; enables TensorBoard logging synced to W&B
+
 Usage examples
 --------------
 From a config file:
 
-	uv run run-simulation --config path/to/config.json
+	uv run compute --config path/to/config.json \\
+		--output-dir /well/<grp>/<user>/results \\
+		--env-file /path/to/.env
 
 With explicit arguments:
 
-	uv run run-simulation \
-		--experiment DigitAThenDigitB_75_25 \
-		--digitA 1 --digitB 2 \
-		--model DNN5Hidden64 \
-		--optimizer sgd \
-		--loss ce \
+	uv run compute \\
+		--output-dir /well/<grp>/<user>/results \\
+		--experiment DigitAThenDigitB_75_25 \\
+		--digitA 1 --digitB 2 \\
+		--model DNN5Hidden64 \\
+		--optimizer sgd \\
+		--loss ce \\
 		--trial-epochs 1 --base-lr 1e-3 --batch-size 1 --seed 3003
 
 Multiple optimizers/models/experiments (CSV lists):
 
-	uv run run-simulation --experiment Exp1,Exp2 --model M1,M2 --optimizer adam,adagrad
+	uv run compute --experiment Exp1,Exp2 --model M1,M2 --optimizer adam,adagrad
 """
 
 import argparse
@@ -54,6 +61,7 @@ if str(_PROJECT_ROOT) not in sys.path:
 	sys.path.insert(0, str(_PROJECT_ROOT))
 
 from compute_results.constants import INITIAL_MODEL_OPTIMIZER_SHORTHAND_TO_CLASS
+from compute_results.defaults import DEFAULT_LR
 from compute_results.config_guard import (
 	ConfigConflictError,
 	build_training_config,
@@ -75,9 +83,13 @@ from compute_results.training_loop import train_with_config
 from experiments import get_experiment, list_experiments
 from models import apply_model_weight_init, get_model, list_models, parse_he_init
 from optimizers import get_extractor, list_extractors
+from scripts.utils.cluster_utils import (
+	add_io_arguments,
+	train_logger,
+)
 
 
-RESULTS_ROOT = _PROJECT_ROOT / "results"
+DEFAULT_RESULTS_ROOT = _PROJECT_ROOT / "results"
 
 OPTIMIZER_SHORTHAND: dict[str, tuple[str, dict]] = {
 	k: (v, {}) for k, v in INITIAL_MODEL_OPTIMIZER_SHORTHAND_TO_CLASS.items()
@@ -105,7 +117,7 @@ def _resolve_optimizer(name: str, base_lr: float, **kwargs) -> tuple[str, dict]:
 	else:
 		cls_name = name
 		out = dict(kwargs)
-	out[OPTIMIZER_LR_KEY] = base_lr if "adam" not in cls_name.lower() else 0.0005
+	out[OPTIMIZER_LR_KEY] = base_lr if "adam" not in cls_name.lower() else 0.0005 * (base_lr / DEFAULT_LR)
 	return cls_name, out
 
 
@@ -147,6 +159,7 @@ class _Task:
 	config: dict
 	seed: int
 	results_dir: Path
+	env_file: Path | None = None
 
 	@property
 	def optimizer_dir(self) -> Path:
@@ -194,14 +207,31 @@ def _run_single_task(
 		device = torch.device("cpu")
 
 	try:
-		train_with_config(
-			experiment=experiment,
-			model=model,
-			extractor=extractor,
-			config=t.config,
-			device=device,
-			results_dir=t.results_dir,
+		run_name = (
+			f"{experiment.experiment_id()}/{model.model_id()}/"
+			f"{extractor.optimizer_id()}"
 		)
+		with train_logger(
+			env_file=t.env_file,
+			run_name=run_name,
+			log_dir=t.optimizer_dir / "tensorboard",
+			config={
+				"experiment": t.experiment_class,
+				"model": t.model_class,
+				"optimizer": t.optimizer_name,
+				"optimizer_id": extractor.optimizer_id(),
+				"seed": t.seed,
+			},
+		) as writer:
+			train_with_config(
+				experiment=experiment,
+				model=model,
+				extractor=extractor,
+				config=t.config,
+				device=device,
+				results_dir=t.results_dir,
+				train_logger=writer,
+			)
 		return (
 			experiment.experiment_id(),
 			model.model_id(),
@@ -390,11 +420,25 @@ def _parse_args() -> argparse.Namespace:
 		"--device",
 		default="cuda" if torch.cuda.is_available() else "cpu",
 	)
+	add_io_arguments(
+		p,
+		output_help=(
+			"Root directory for simulation results "
+			f"(default: {DEFAULT_RESULTS_ROOT})."
+		),
+	)
 	return p.parse_args()
 
 
 def main() -> int:
 	args = _parse_args()
+
+	results_root = (
+		args.output_dir.expanduser()
+		if args.output_dir is not None
+		else DEFAULT_RESULTS_ROOT
+	)
+	results_root.mkdir(parents=True, exist_ok=True)
 
 	if args.config is not None:
 		raw = json.loads(args.config.read_text())
@@ -596,7 +640,7 @@ def main() -> int:
 				else None
 			),
 		)
-		exp_dir = RESULTS_ROOT / experiment.experiment_id()
+		exp_dir = results_root / experiment.experiment_id()
 		rid = result_id_for_config(
 			config,
 			experiment_dir=exp_dir,
@@ -619,6 +663,7 @@ def main() -> int:
 				config=config,
 				seed=seed,
 				results_dir=results_dir,
+				env_file=args.env_file,
 			)
 		)
 
@@ -713,7 +758,7 @@ def main() -> int:
 		)
 		_run_single_task(task, device_id)
 
-	print("Done. Results saved to:", RESULTS_ROOT)
+	print("Done. Results saved to:", results_root)
 	return 0
 
 

@@ -50,7 +50,7 @@ class SGDExtractor(OptimizerSignalExtractor):
 		return torch.optim.SGD(params, lr=self.lr, momentum=self.momentum)
 
 	def signal_names(self) -> list[str]:
-		return ["grad_norm", "grad_cosine_sim"]
+		return ["grad", "grad_norm", "grad_cosine_sim"]
 
 	def on_before_step(
 		self, model: nn.Module, optimizer: torch.optim.Optimizer,

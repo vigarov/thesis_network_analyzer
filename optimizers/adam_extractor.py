@@ -2,13 +2,14 @@
 
 Per-unit signals (gradient signals inherited from base):
 - grad_norm, grad_cosine_sim
-- exp_avg_norm: L2 norm of the first-moment slice for each unit.
-- exp_avg_sq_norm: L2 norm of the second-moment slice for each unit.
+- exp_avg: full first-moment slice for each unit's incoming weights.
+- exp_avg_sq: full second-moment slice for each unit.
 - moment_cosine_sim: cosine similarity between consecutive first-moment
   snapshots for each unit.
 """
 from typing import Any
 
+import numpy as np
 import torch
 
 from compute_results.defaults import (
@@ -56,10 +57,11 @@ class AdamExtractor(OptimizerSignalExtractor):
 
 	def signal_names(self) -> list[str]:
 		return [
+			"grad",
 			"grad_norm",
 			"grad_cosine_sim",
-			"exp_avg_norm",
-			"exp_avg_sq_norm",
+			"exp_avg",
+			"exp_avg_sq",
 			"moment_cosine_sim",
 		]
 
@@ -70,24 +72,24 @@ class AdamExtractor(OptimizerSignalExtractor):
 
 	def on_after_step(
 		self, model: torch.nn.Module, optimizer: torch.optim.Optimizer,
-	) -> dict[str, dict[str, float]]:
-		avg_norms: dict[str, float] = {}
-		sq_norms: dict[str, float] = {}
+	) -> dict[str, dict[str, Any]]:
+		exp_avgs: dict[str, np.ndarray] = {}
+		exp_avg_sqs: dict[str, np.ndarray] = {}
 		moment_cos: dict[str, float] = {}
 
 		for u in self._units:
 			nid = u["node_id"]
 			param = self._find_weight_param(model, u["layer_name"])
 			if param is None:
-				avg_norms[nid] = float("nan")
-				sq_norms[nid] = float("nan")
+				exp_avgs[nid] = np.array([float("nan")])
+				exp_avg_sqs[nid] = np.array([float("nan")])
 				moment_cos[nid] = float("nan")
 				continue
 
 			state = optimizer.state.get(param)
 			if not state or "exp_avg" not in state:
-				avg_norms[nid] = float("nan")
-				sq_norms[nid] = float("nan")
+				exp_avgs[nid] = np.array([float("nan")])
+				exp_avg_sqs[nid] = np.array([float("nan")])
 				moment_cos[nid] = float("nan")
 				continue
 
@@ -95,8 +97,8 @@ class AdamExtractor(OptimizerSignalExtractor):
 			ea = state["exp_avg"][idx].detach().flatten().float()
 			eas = state["exp_avg_sq"][idx].detach().flatten().float()
 
-			avg_norms[nid] = ea.norm().item()
-			sq_norms[nid] = eas.norm().item()
+			exp_avgs[nid] = ea.cpu().numpy()
+			exp_avg_sqs[nid] = eas.cpu().numpy()
 
 			prev = self._prev_exp_avg.get(nid)
 			if prev is not None and prev.shape == ea.shape:
@@ -108,7 +110,7 @@ class AdamExtractor(OptimizerSignalExtractor):
 			self._prev_exp_avg[nid] = ea.clone()
 
 		return {
-			"exp_avg_norm": avg_norms,
-			"exp_avg_sq_norm": sq_norms,
+			"exp_avg": exp_avgs,
+			"exp_avg_sq": exp_avg_sqs,
 			"moment_cosine_sim": moment_cos,
 		}

@@ -7,12 +7,13 @@ from typing import Any
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, Subset
+from torch.utils.tensorboard import SummaryWriter
 from torchvision import datasets, transforms
 from tqdm import tqdm
 
 from compute_results.config_guard import build_pretrain_report, save_pretrain_report
 from compute_results.constants import BS_LINEAR_BRACKET_THRESHOLD
-from experiments.mnist.base import digit_indices, make_loader
+from experiments.mnist.base import DATA_ROOT, digit_indices, make_loader
 from models import apply_model_weight_init, get_model
 from optimizers import get_extractor
 
@@ -42,7 +43,6 @@ def build_mnist_train_and_eval(
 	batch_size: int,
 	*,
 	dataset_seed: int,
-	data_root: str = "./data",
 ) -> tuple[Subset, DataLoader, DataLoader]:
 	"""Mirror `MNISTWrapper._ensure_datasets` (train stats, eval holdout, uniform K).
 
@@ -51,17 +51,17 @@ def build_mnist_train_and_eval(
 	"""
 	n_digits = 10
 	raw_train = datasets.MNIST(
-		root=data_root, train=True, download=True, transform=transforms.ToTensor(),
+		root=DATA_ROOT, train=True, download=True, transform=transforms.ToTensor(),
 	)
 	pixels = raw_train.data.float() / 255.0
 	mean, std = pixels.mean().item(), pixels.std().item()
 	tfm = transforms.Compose([transforms.ToTensor(), transforms.Normalize((mean,), (std,))])
 
 	full_train = datasets.MNIST(
-		root=data_root, train=True, download=True, transform=tfm,
+		root=DATA_ROOT, train=True, download=True, transform=tfm,
 	)
 	test_ds = datasets.MNIST(
-		root=data_root, train=False, download=True, transform=tfm,
+		root=DATA_ROOT, train=False, download=True, transform=tfm,
 	)
 
 	all_digits = tuple(range(n_digits))
@@ -277,6 +277,8 @@ def binary_search_first_threshold_step(
 	device: torch.device,
 	eval_loader: DataLoader,
 	verify_first: bool = False,
+	train_logger: SummaryWriter | None = None,
+	steps_before: int = 0,
 ) -> int:
 	"""Smallest k in 1..N with all_test acc >= threshold after k steps from snapshot."""
 	n = len(batches)
@@ -352,6 +354,8 @@ def binary_search_first_threshold_step(
 			train_first_n_batches(model, optimizer, criterion, batches, mid, device)
 		_, acc_mid = full_loader_loss_acc(model, eval_loader, device)
 		print(f"[{slug}] BS probe #{probe}: after {mid} steps, all_test_acc={acc_mid:.6f}")
+		if train_logger is not None:
+			train_logger.add_scalar("phase_b/mid_test_acc", acc_mid, steps_before + mid)
 		if acc_mid >= threshold:
 			hi = mid
 			cached_step = None
@@ -380,16 +384,26 @@ def run_training_until_threshold_with_refinement(
 	threshold_acc: float,
 	max_epochs: int,
 	device: torch.device,
+	train_logger: SummaryWriter | None = None,
 ) -> dict:
-	"""Phase A: full epochs (fixed shuffle per epoch). Phase B: exact crossing step in last epoch."""
+	"""Phase A: full epochs (fixed shuffle per epoch). Phase B: exact crossing step in last epoch.
+
+	If Phase A exhausts *max_epochs* without crossing *threshold_acc*, the best-scoring
+	end-of-epoch checkpoint is restored for saving (when the caller persists outputs).
+	"""
 	train_loss_hist: list[float] = []
 	test_loss_hist: list[float] = []
 	iter_snapshots: list[int] = []
 	global_step = 0
 	reached = False
+	saved_best_at_max_epochs = False
 	crossing_epoch_idx: int | None = None
 	crossing_batches: list[tuple[torch.Tensor, torch.Tensor]] | None = None
 	snapshot_at_crossing_start: dict | None = None
+	best_test_acc = float("-inf")
+	best_snapshot: dict | None = None
+	best_epoch_idx: int | None = None
+	best_global_step: int | None = None
 
 	epoch_start_snapshots: list[dict] = [take_snapshot(model, optimizer)]
 
@@ -430,6 +444,16 @@ def run_training_until_threshold_with_refinement(
 			f"[{slug}] Phase A epoch {epoch_idx + 1:3d}  iters={global_step:5d}  "
 			f"train_loss={train_loss:.4f}  test_loss={test_loss:.4f}  all_test_acc={test_acc:.4f}"
 		)
+		if train_logger is not None:
+			train_logger.add_scalar("phase_a/train_loss", train_loss, global_step)
+			train_logger.add_scalar("phase_a/test_loss", test_loss, global_step)
+			train_logger.add_scalar("phase_a/test_acc", test_acc, global_step)
+
+		if test_acc >= best_test_acc:
+			best_test_acc = test_acc
+			best_snapshot = epoch_start_snapshots[-1]
+			best_epoch_idx = epoch_idx
+			best_global_step = global_step
 
 		if test_acc >= threshold_acc:
 			reached = True
@@ -459,6 +483,8 @@ def run_training_until_threshold_with_refinement(
 			device=device,
 			eval_loader=eval_loader,
 			verify_first=verify_first,
+			train_logger=train_logger,
+			steps_before=steps_before,
 		)
 		load_snapshot(model, optimizer, snapshot_at_crossing_start, device)
 		final_train_loss, _ = train_first_n_batches(
@@ -475,11 +501,25 @@ def run_training_until_threshold_with_refinement(
 			f"(epoch {crossing_epoch_idx + 1} step {k}/{len(crossing_batches)}), "
 			f"all_test_acc={final_test_acc:.6f}"
 		)
+		if train_logger is not None:
+			train_logger.add_scalar("phase_b/final_test_acc", final_test_acc, exact_step)
+			train_logger.add_scalar("phase_b/final_train_loss", final_train_loss, exact_step)
 	elif not reached:
 		print(
 			f"[{slug}] Phase A stopped at max_epochs={max_epochs} without reaching "
 			f"threshold_acc={threshold_acc}."
 		)
+		if best_snapshot is not None and best_epoch_idx is not None and best_global_step is not None:
+			load_snapshot(model, optimizer, best_snapshot, device)
+			final_test_acc = best_test_acc
+			final_train_loss = train_loss_hist[best_epoch_idx]
+			final_test_loss = test_loss_hist[best_epoch_idx]
+			exact_step = best_global_step
+			saved_best_at_max_epochs = True
+			print(
+				f"[{slug}] Restored best checkpoint from epoch {best_epoch_idx + 1} "
+				f"(all_test_acc={best_test_acc:.6f}) for saving."
+			)
 
 	print(f"[{slug}] Total optimizer iterations (reported): {exact_step}")
 
@@ -489,6 +529,9 @@ def run_training_until_threshold_with_refinement(
 		"iters": list(iter_snapshots),
 		"steps": exact_step,
 		"reached": reached,
+		"saved_best_at_max_epochs": saved_best_at_max_epochs,
+		"best_epoch": (best_epoch_idx + 1) if best_epoch_idx is not None else None,
+		"best_test_acc": best_test_acc if best_epoch_idx is not None else None,
 		"final_test_acc": final_test_acc,
 		"final_train_loss": final_train_loss,
 		"final_test_loss": final_test_loss,
@@ -535,8 +578,17 @@ def save_pretrained_checkpoint(
 		optimizer_id=slug,
 	)
 	save_pretrain_report(save_root, report)
+	if training_result.get("reached"):
+		save_reason = "exact threshold crossing"
+	elif training_result.get("saved_best_at_max_epochs"):
+		save_reason = (
+			f"best Phase A checkpoint (epoch {training_result.get('best_epoch')}, "
+			f"all_test_acc={training_result.get('best_test_acc'):.6f}; threshold not reached)"
+		)
+	else:
+		save_reason = "checkpoint"
 	print(
-		f"[seed={seed}][{slug}] Saved model + optimizer state at exact crossing "
+		f"[seed={seed}][{slug}] Saved model + optimizer state ({save_reason}) "
 		f"under {save_root.resolve()}"
 	)
 
@@ -552,6 +604,7 @@ def train_optimizer_for_seed(
 	opt_class: str,
 	opt_kwargs: dict[str, Any],
 	device: torch.device,
+	train_logger: SummaryWriter | None = None,
 ) -> dict:
 	"""Train one (optimizer, model_seed) pair; optionally save checkpoint."""
 	criterion = torch.nn.CrossEntropyLoss()
@@ -586,6 +639,7 @@ def train_optimizer_for_seed(
 		threshold_acc=run_cfg.threshold_acc,
 		max_epochs=run_cfg.max_epochs,
 		device=device,
+		train_logger=train_logger,
 	)
 
 	result = {
@@ -597,6 +651,9 @@ def train_optimizer_for_seed(
 		"test": training_result["test"],
 		"steps": training_result["steps"],
 		"reached": training_result["reached"],
+		"saved_best_at_max_epochs": training_result["saved_best_at_max_epochs"],
+		"best_epoch": training_result["best_epoch"],
+		"best_test_acc": training_result["best_test_acc"],
 		"final_test_acc": training_result["final_test_acc"],
 		"final_train_loss": training_result["final_train_loss"],
 		"final_test_loss": training_result["final_test_loss"],
@@ -608,11 +665,11 @@ def train_optimizer_for_seed(
 	}
 
 	if run_cfg.save:
-		if not training_result["reached"]:
-			print(f"[seed={seed}][{slug}] SAVE skipped: threshold not reached.")
-		else:
+		if training_result["reached"] or training_result["saved_best_at_max_epochs"]:
 			result["save_root"] = resolve_save_root(
 				run_cfg.out_dir, slug=slug, seed=seed,
 			)
+		else:
+			print(f"[seed={seed}][{slug}] SAVE skipped: no checkpoint available.")
 
 	return result

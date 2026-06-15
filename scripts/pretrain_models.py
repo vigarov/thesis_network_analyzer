@@ -4,23 +4,27 @@
 Results are written under a user-specified directory template (`!OPT` / `!SD`)
 as `model.pt`, `optimizer.pt`, `report.json`, and `pretrain_config.json`.
 
+Cluster-oriented paths:
+	--output-dir  Checkpoint output template with !OPT / !SD (alias: --out-dir)
+	--env-file    Dotenv with WANDB_* keys; enables TensorBoard logging synced to W&B
+
 Usage examples
 --------------
 From a simulation or pretrain config file:
 
-	uv run pretrain-models --config input_configs/cat2_sequence_pretrain_control_multi.json
+	uv run pretrain-models --config input_configs/cat2_sequence_pretrain_control_multi.json \\
+		--output-dir '/scratch/pretrain/!OPT/!SD/'
 
 With explicit arguments:
 
 	uv run pretrain-models --model DNN5Hidden64 --optimizer adam \\
-		--train-k-samples 1000 --multi_seeds 6
+		--output-dir '/scratch/pretrain/!OPT/!SD/' \\
+		--train-k-samples 1000 --multi_seeds 6 --env-file /path/to/.env
 
 Full notebook seed list (bare `--multi_seeds`):
 
 	uv run pretrain-models --config path/to/config.json --multi_seeds
 """
-
-from __future__ import annotations
 
 import argparse
 import json
@@ -55,9 +59,25 @@ from compute_results.pretrain import (
 	save_pretrained_checkpoint,
 	train_optimizer_for_seed,
 )
+from experiments.base import get_registered_experiment_class
 from models import list_models, parse_he_init
 from optimizers import get_extractor, list_extractors
+from scripts.utils.cluster_utils import (
+	add_io_arguments,
+	train_logger,
+)
 from scripts.run_simulation import _resolve_optimizer
+
+
+def _pretrain_skip_reason(raw: dict) -> str | None:
+	"""Return a human-readable skip reason, or None if pretrain should run."""
+	experiment_class = raw.get("experiment_class")
+	if not experiment_class:
+		return None
+	cls = get_registered_experiment_class(str(experiment_class))
+	if getattr(cls, "has_pretrain", False):
+		return None
+	return f"{experiment_class} does not require pretrain checkpoints (has_pretrain=False)"
 
 
 def _parse_args() -> argparse.Namespace:
@@ -112,9 +132,14 @@ def _parse_args() -> argparse.Namespace:
 	p.add_argument(
 		"--out-dir",
 		default=None,
-		help="Output template with !OPT and optionally !SD placeholders.",
+		help="Output template with !OPT and optionally !SD placeholders (alias: --output-dir).",
 	)
-	p.add_argument("--data-root", default=None, help="MNIST download directory.")
+	add_io_arguments(
+		p,
+		output_help=(
+			"Output template with !OPT and optionally !SD placeholders (overrides --out-dir)."
+		),
+	)
 	p.add_argument("--save", action="store_true", help="Force saving checkpoints.")
 	p.add_argument("--no-save", action="store_true", help="Skip writing checkpoints.")
 	p.add_argument(
@@ -159,6 +184,10 @@ def main() -> int:
 
 	if args.config is not None:
 		raw = json.loads(args.config.read_text())
+		skip_reason = _pretrain_skip_reason(raw)
+		if skip_reason is not None:
+			print(f"Skipping pretrain: {skip_reason}")
+			return 0
 	else:
 		if not (args.model and args.optimizer):
 			print(
@@ -173,6 +202,9 @@ def main() -> int:
 	except ValueError as e:
 		print(f"ERROR: {e}", file=sys.stderr)
 		sys.exit(1)
+
+	if args.output_dir is not None:
+		params["out_dir"] = str(args.output_dir.expanduser())
 
 	try:
 		optimizer_names = expand_registry_selection(
@@ -249,7 +281,7 @@ def main() -> int:
 		params["train_k_samples"],
 		params["batch_size"],
 		dataset_seed=params["dataset_seed"],
-		data_root=params["data_root"],
+		DATA_ROOT=params["data_root"],
 	)
 	print(
 		f"dataset_seed={params['dataset_seed']}  "
@@ -288,22 +320,39 @@ def main() -> int:
 					sys.exit(1)
 
 			try:
-				result = train_optimizer_for_seed(
-					seed,
-					run_cfg=run_cfg,
-					dataset_seed=params["dataset_seed"],
-					train_ds=train_ds,
-					eval_loader=all_test,
-					opt_name=opt_name,
-					opt_class=opt_class,
-					opt_kwargs=opt_kwargs,
-					device=device,
-				)
+				log_root = resolve_save_root(params["out_dir"], slug=slug, seed=seed)
+				run_name = f"pretrain/{params['model_class']}/{slug}/seed_{seed}"
+				with train_logger(
+					env_file=args.env_file,
+					run_name=run_name,
+					log_dir=log_root / "tensorboard",
+					config={
+						"model": params["model_class"],
+						"optimizer": opt_name,
+						"optimizer_id": slug,
+						"model_seed": seed,
+						"dataset_seed": params["dataset_seed"],
+						"train_k_samples": params["train_k_samples"],
+						"threshold_acc": params["threshold_acc"],
+					},
+				) as writer:
+					result = train_optimizer_for_seed(
+						seed,
+						run_cfg=run_cfg,
+						dataset_seed=params["dataset_seed"],
+						train_ds=train_ds,
+						eval_loader=all_test,
+						opt_name=opt_name,
+						opt_class=opt_class,
+						opt_kwargs=opt_kwargs,
+						device=device,
+						train_logger=writer,
+					)
 			except Exception as e:
 				print(f"ERROR: seed={seed} optimizer={opt_name}: {e}", file=sys.stderr)
 				raise
 
-			if run_cfg.save and result.get("reached") and "save_root" in result:
+			if run_cfg.save and "save_root" in result:
 				save_pretrained_checkpoint(
 					save_root=save_root,
 					model=result["model"],

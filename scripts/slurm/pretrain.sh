@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# Usage: bash scripts/slurm/pretrain.sh [--auto-sync [SECONDS]]
+
+#SBATCH --job-name=net-pretrain
+#SBATCH --time=01:00:00
+#SBATCH --account=<ACCOUNT>
+#SBATCH --partition=<PARTITION>
+#SBATCH --gres=gpu:<GPUS>
+#SBATCH --cpus-per-task=<CPUS>
+#SBATCH --mem=<MEM>
+
+if [[ -z "${SLURM_JOB_ID:-}" && "${BASH_SOURCE[0]}" == "${0}" ]]; then
+	set -euo pipefail
+	# shellcheck source=common.sh
+	source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh" # Load the common functions
+	_run_submit_wrapper "${BASH_SOURCE[0]}" "$@" # calls `sbatch` and exits
+fi
+# else (coming from _run_submit_wrapper):
+set -euo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/common.sh" # Load the common functions
+require_array_task_id
+
+CONFIG="$(config_for_array_task "${SLURM_ARRAY_TASK_ID}")"
+echo "pretrain config=${CONFIG}"
+
+run_uv pretrain-models \
+	--config "${CONFIG}" \
+	--output-dir "${PRETRAIN_OUTPUT_DIR}" \
+	--env-file "${ENV_FILE}"

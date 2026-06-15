@@ -48,7 +48,7 @@ class AdaGradExtractor(OptimizerSignalExtractor):
 		return torch.optim.Adagrad(params, lr=self.lr, eps=self.eps)
 
 	def signal_names(self) -> list[str]:
-		return ["grad_norm", "grad_cosine_sim", "effective_lr"]
+		return ["grad", "grad_norm", "grad_cosine_sim", "effective_lr"]
 
 	def on_before_step(
 		self, model: torch.nn.Module, optimizer: torch.optim.Optimizer,

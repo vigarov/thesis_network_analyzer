@@ -986,6 +986,8 @@ def parse_pretrain_inputs(
 	out_dir = str(raw.get("out_dir", default_out))
 	if getattr(cli, "out_dir", None) is not None:
 		out_dir = str(cli.out_dir)
+	if getattr(cli, "output_dir", None) is not None:
+		out_dir = str(cli.output_dir)
 
 	opt_extra_kwargs: dict[str, Any] = {}
 	eps_from_json = raw.get(SHAMPOO_PRECONDITIONER_EPSILON_KEY)
@@ -1160,7 +1162,7 @@ def build_pretrain_report(
 	optimizer_class: str,
 	optimizer_id: str,
 ) -> dict[str, Any]:
-	"""Build a human-readable run summary for ``report.json``."""
+	"""Build a human-readable run summary for `report.json`."""
 	config = pretrain_fingerprint_payload(pretrain_config)
 	return {
 		"model_class": pretrain_config["model_class"],
@@ -1175,6 +1177,11 @@ def build_pretrain_report(
 			"crossing_epoch": training_result.get("crossing_epoch"),
 			"step_in_crossing_epoch": training_result.get("step_in_crossing_epoch"),
 			"reached_threshold": bool(training_result.get("reached", False)),
+			"saved_best_at_max_epochs": bool(
+				training_result.get("saved_best_at_max_epochs", False)
+			),
+			"best_epoch": training_result.get("best_epoch"),
+			"best_test_acc": training_result.get("best_test_acc"),
 			"final_train_loss": training_result.get("final_train_loss"),
 			"final_test_loss": training_result.get("final_test_loss"),
 			"final_test_acc": training_result.get("final_test_acc"),
@@ -1184,7 +1191,7 @@ def build_pretrain_report(
 
 
 def load_pretrain_report(save_root: Path) -> dict[str, Any]:
-	"""Load ``report.json`` from a pretrain checkpoint directory."""
+	"""Load `report.json` from a pretrain checkpoint directory."""
 	return json.loads((save_root / "report.json").read_text())
 
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 import abc
 from typing import Any
 
+import numpy as np
 import torch
 import torch.nn as nn
 
@@ -15,7 +16,9 @@ class OptimizerSignalExtractor(abc.ABC):
 	Each concrete extractor wraps a specific optimizer type and knows how to
 	pull relevant internal state (moments, accumulators, etc.) out of it.
 
-	All signals are **per-unit, per-iteration**: every signal maps `{node_id: scalar_value}`
+	Per-unit signals map `{node_id: scalar | 1-D ndarray}` (e.g. per-weight effective LR).
+	Global block signals (Shampoo inverse-factor matrices) are returned from
+	`on_after_step_blocks` as `{block_key: 2-D ndarray}`.
 	"""
 
 	def __init__(self) -> None:
@@ -42,11 +45,12 @@ class OptimizerSignalExtractor(abc.ABC):
 
 	def _compute_grad_signals(
 		self, model: nn.Module,
-	) -> dict[str, dict[str, float]]:
-		"""Per-unit gradient norm and cosine similarity vs previous iteration.
+	) -> dict[str, dict[str, Any]]:
+		"""Per-unit gradient vectors, norms, and cosine similarity vs previous iteration.
 
 		Shared by all extractors - call from `on_before_step`.
 		"""
+		grads: dict[str, np.ndarray] = {}
 		norms: dict[str, float] = {}
 		cosines: dict[str, float] = {}
 
@@ -54,11 +58,13 @@ class OptimizerSignalExtractor(abc.ABC):
 			nid = u["node_id"]
 			param = self._find_weight_param(model, u["layer_name"])
 			if param is None or param.grad is None:
+				grads[nid] = np.array([float("nan")])
 				norms[nid] = float("nan")
 				cosines[nid] = float("nan")
 				continue
 
 			grad = param.grad[u["unit_index"]].detach().flatten().float()
+			grads[nid] = grad.cpu().numpy()
 			norms[nid] = grad.norm().item()
 
 			prev = self._prev_grads.get(nid)
@@ -71,7 +77,7 @@ class OptimizerSignalExtractor(abc.ABC):
 
 			self._prev_grads[nid] = grad.clone()
 
-		return {"grad_norm": norms, "grad_cosine_sim": cosines}
+		return {"grad": grads, "grad_norm": norms, "grad_cosine_sim": cosines}
 
 	# ------------------------------------------------------------------
 	# Abstract interface
@@ -91,7 +97,7 @@ class OptimizerSignalExtractor(abc.ABC):
 
 	@abc.abstractmethod
 	def signal_names(self) -> list[str]:
-		"""Names of per-unit, per-iteration scalar signals this extractor logs."""
+		"""Names of per-unit, per-iteration signals this extractor logs."""
 
 	@abc.abstractmethod
 	def on_before_step(
@@ -114,6 +120,17 @@ class OptimizerSignalExtractor(abc.ABC):
 
 		Return `{signal_name: {node_id: value}}`.
 		"""
+
+	def on_after_step_shampoo_blocks(
+		self,
+		model: nn.Module,
+		optimizer: torch.optim.Optimizer,
+	) -> dict[str, np.ndarray]:
+		"""Called after `on_after_step` each iteration.
+		Only non `{}` defined for Shampoo extractors 
+		Return global block signals `{block_key: matrix}` not keyed by unit.
+		"""
+		return {}
 
 
 # ---------------------------------------------------------------------------
