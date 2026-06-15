@@ -180,7 +180,9 @@ def _validate_names(model_class: str, optimizers_list: list[str]) -> None:
 
 
 def main() -> int:
+	print("Starting pretrain_models...")
 	args = _parse_args()
+	print(f"Parsed args")
 
 	if args.config is not None:
 		raw = json.loads(args.config.read_text())
