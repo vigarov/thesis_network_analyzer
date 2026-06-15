@@ -3,11 +3,9 @@
 
 #SBATCH --job-name=net-pretrain
 #SBATCH --time=01:00:00
-#SBATCH --account=<ACCOUNT>
-#SBATCH --partition=<PARTITION>
-#SBATCH --gres=gpu:<GPUS>
-#SBATCH --cpus-per-task=<CPUS>
-#SBATCH --mem=<MEM>
+#SBATCH --gres=gpu:1
+#SBATCH --cpus-per-task=4
+#SBATCH --mem=10G
 
 if [[ -z "${SLURM_JOB_ID:-}" && "${BASH_SOURCE[0]}" == "${0}" ]]; then
 	set -euo pipefail

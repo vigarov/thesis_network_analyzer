@@ -6,12 +6,10 @@
 # Adjust #SBATCH --array to 0-(N-1) where N = number of JSON configs (currently 8 → 0-7).
 
 #SBATCH --job-name=net-simulation
-#SBATCH --time=<WALLTIME>
-#SBATCH --account=<ACCOUNT>
-#SBATCH --partition=<PARTITION>
-#SBATCH --gres=gpu:<GPUS>
-#SBATCH --cpus-per-task=<CPUS>
-#SBATCH --mem=<MEM>
+#SBATCH --time=04:00:00
+#SBATCH --gres=gpu:1
+#SBATCH --cpus-per-task=16
+#SBATCH --mem=48G
 
 
 # when run directly (not submitted through sbatch)

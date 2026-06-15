@@ -2,7 +2,7 @@
 # Submit the full pipeline with job dependencies:
 #   pretrain (array) → simulation (array) → analyse
 #
-# Usage (from repo root, after filling .env and #SBATCH placeholders in each script):
+# Usage (from repo root, after filling .env):
 #   bash scripts/slurm/submit_all.sh [--auto-sync [SECONDS]]
 #
 # Slurm log paths (--output / --error) and --array are passed at submit time from common.sh

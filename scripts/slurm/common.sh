@@ -26,6 +26,7 @@ set +a
 : "${PRETRAIN_OUTPUT_DIR:?Set PRETRAIN_OUTPUT_DIR in ${ENV_FILE}}"
 : "${ANALYSIS_OUTPUT_DIR:?Set ANALYSIS_OUTPUT_DIR in ${ENV_FILE}}"
 : "${SLURM_LOG_DIR:?Set SLURM_LOG_DIR in ${ENV_FILE}}"
+: "${SLURM_ACCOUNT:?Set SLURM_ACCOUNT in ${ENV_FILE}}"
 
 PROJECT_ROOT="$(cd "${PROJECT_ROOT}" && pwd)"
 mkdir -p "${RESULTS_DIR}" "${ANALYSIS_OUTPUT_DIR}" "${SLURM_LOG_DIR}"
@@ -227,7 +228,7 @@ _sbatch_with_logs() {
 		stage="$(_slurm_stage_from_script "${script_path}")"
 	fi
 
-	local -a sbatch_args=(--parsable)
+	local -a sbatch_args=(--parsable --account="${SLURM_ACCOUNT}")
 	mapfile -d '' -t _log_array_args < <(_sbatch_log_and_array_args "${script_path}" "${stage}")
 	sbatch_args+=("${_log_array_args[@]}")
 	if (($#)); then

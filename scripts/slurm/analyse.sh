@@ -6,7 +6,6 @@
 
 #SBATCH --job-name=net-analyse
 #SBATCH --time=24:00:00
-#SBATCH --account=<ACCOUNT>
 #SBATCH --cpus-per-task=32
 #SBATCH --mem=48G
 
