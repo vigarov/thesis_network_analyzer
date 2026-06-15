@@ -281,7 +281,6 @@ def main() -> int:
 		params["train_k_samples"],
 		params["batch_size"],
 		dataset_seed=params["dataset_seed"],
-		DATA_ROOT=params["data_root"],
 	)
 	print(
 		f"dataset_seed={params['dataset_seed']}  "
