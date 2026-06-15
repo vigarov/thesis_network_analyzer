@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Submit: sbatch scripts/slurm/analyse.sh
-# Or (login node, optional wandb sync loop): bash scripts/slurm/analyse.sh [--auto-sync [SECONDS]]
+# Or (login node, wandb sync loop on by default): bash scripts/slurm/analyse.sh [--no-auto-sync] [--auto-sync [SECONDS]]
 #
 # Scans all simulation results under RESULTS_DIR (single job, not an array).
 

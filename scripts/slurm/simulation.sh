@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Submit: sbatch scripts/slurm/simulation.sh
-# Or (login node, optional wandb sync loop): bash scripts/slurm/simulation.sh [--auto-sync [SECONDS]]
+# Or (login node, wandb sync loop on by default): bash scripts/slurm/simulation.sh [--no-auto-sync] [--auto-sync [SECONDS]]
 #
 # One array task per file in input_configs/*.json
 # Adjust #SBATCH --array to 0-(N-1) where N = number of JSON configs (currently 8 → 0-7).

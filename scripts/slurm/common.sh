@@ -118,9 +118,13 @@ _sbatch_log_and_array_args() {
 }
 
 parse_submit_args() {
-	AUTO_SYNC_INTERVAL=""
+	AUTO_SYNC_INTERVAL="${DEFAULT_AUTO_SYNC_INTERVAL}"
 	while (($#)); do
 		case "$1" in
+		--no-auto-sync)
+			AUTO_SYNC_INTERVAL=""
+			shift
+			;;
 		--auto-sync)
 			shift
 			if [[ "${1:-}" =~ ^[0-9]+$ ]]; then
@@ -132,7 +136,7 @@ parse_submit_args() {
 			;;
 		*)
 			echo "ERROR: unknown submit argument: $1" >&2
-			echo "Usage: bash $0 [--auto-sync [SECONDS]]" >&2
+			echo "Usage: bash $0 [--no-auto-sync] [--auto-sync [SECONDS]]" >&2
 			exit 2
 			;;
 		esac

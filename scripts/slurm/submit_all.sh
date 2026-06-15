@@ -3,13 +3,14 @@
 #   pretrain (array) → simulation (array) → analyse
 #
 # Usage (from repo root, after filling .env):
-#   bash scripts/slurm/submit_all.sh [--auto-sync [SECONDS]]
+#   bash scripts/slurm/submit_all.sh [--no-auto-sync] [--auto-sync [SECONDS]]
 #
 # Slurm log paths (--output / --error) and --array are passed at submit time from common.sh
 # using SLURM_LOG_DIR and the number of input_configs/*.json files.
 #
-# With --auto-sync, a background loop on the login node periodically runs
-# `wandb sync` on offline runs under RESULTS_DIR / pretrain output / PROJECT_ROOT.
+# By default, a background loop on the login node periodically runs `wandb sync`
+# on offline runs under RESULTS_DIR / pretrain output / PROJECT_ROOT.
+# Pass --no-auto-sync to disable, or --auto-sync [SECONDS] to change the interval.
 # The loop stops (with a final sync) when the pipeline succeeds or fails.
 
 set -euo pipefail

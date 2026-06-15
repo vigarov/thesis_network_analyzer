@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Usage: bash scripts/slurm/pretrain.sh [--auto-sync [SECONDS]]
+# Usage: bash scripts/slurm/pretrain.sh [--no-auto-sync] [--auto-sync [SECONDS]]
 
 #SBATCH --job-name=net-pretrain-all
 #SBATCH --time=02:00:00
