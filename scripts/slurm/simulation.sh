@@ -8,6 +8,7 @@
 #SBATCH --job-name=net-simulation
 #SBATCH --time=04:00:00
 #SBATCH --gpus=1
+#SBATCH --partition=gpu_rtx8000_48gb,gpu_v100_32gb,gpu_a100_40gb,gpu_a100_80gb # gpu_p100_16gb supports cuda 6.0 max -> cuda 12? removing it for now 
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=48G
 
