@@ -175,7 +175,8 @@ _wandb_sync_once() {
 		while IFS= read -r -d '' run_dir; do
 			[[ -f "${run_dir}/.wandb_synced" ]] && continue
 			echo "wandb sync: ${run_dir}"
-			if run_uv wandb sync "${run_dir}" --mark-synced; then
+			# we don't want to re-setup uv here
+			if uv run wandb sync "${run_dir}" --mark-synced; then
 				: >"${run_dir}/.wandb_synced"
 			fi
 		done < <(find "${root}" -type d -name 'offline-run-*' -print0 2>/dev/null || true)
