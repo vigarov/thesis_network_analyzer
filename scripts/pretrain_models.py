@@ -24,6 +24,15 @@ With explicit arguments:
 Full notebook seed list (bare `--multi_seeds`):
 
 	uv run pretrain-models --config path/to/config.json --multi_seeds
+
+Sweep learning rates (each lr lands in its own !OPT slug directory):
+
+	uv run pretrain-models --config path/to/config.json --multi_lr 1e-3,1e-2,1e-1
+	uv run pretrain-models --config path/to/config.json --multi_lr
+
+Combined seed x lr sweep:
+
+	uv run pretrain-models --config path/to/config.json --multi_seeds 6,7 --multi_lr 1e-3,1e-2
 """
 
 import argparse
@@ -50,6 +59,7 @@ from compute_results.config_guard import (
 )
 from compute_results.constants import (
 	INITIAL_MODEL_OPTIMIZER_SHORTHAND_TO_CLASS,
+	MULTI_LRS_USE_DEFAULT,
 	MULTI_SEEDS_USE_DEFAULT,
 )
 from compute_results.pretrain import (
@@ -119,6 +129,20 @@ def _parse_args() -> argparse.Namespace:
 		),
 	)
 	p.add_argument("--base-lr", type=float, default=None)
+	p.add_argument(
+		"--multi_lr",
+		"--multi_lrs",
+		dest="multi_lr",
+		nargs="?",
+		const=MULTI_LRS_USE_DEFAULT,
+		default=None,
+		metavar="LRS",
+		help=(
+			"Base learning rates to pretrain over. Bare flag uses the default sweep "
+			"list; with a CSV (e.g. 1e-3,1e-2,1e-1) overrides config base_lr. Adam's "
+			"lr is derived from each base_lr. Each lr lands in its own !OPT slug dir."
+		),
+	)
 	p.add_argument("--batch-size", type=int, default=None)
 	p.add_argument("--activation", default=None)
 	p.add_argument(
@@ -223,36 +247,6 @@ def main() -> int:
 	params["optimizer_names"] = optimizer_names
 	_validate_names(params["model_class"], optimizer_names)
 
-	pretrain_config = build_pretrain_config(
-		model_class=params["model_class"],
-		model_config=params["model_config"],
-		activation=params["activation"],
-		optimizer_names=optimizer_names,
-		base_lr=params["base_lr"],
-		batch_size=params["batch_size"],
-		he_init=params["he_init"],
-		init_epsilon=params["init_epsilon"],
-		dataset_seed=params["dataset_seed"],
-		model_seeds=params["model_seeds"],
-		train_k_samples=params["train_k_samples"],
-		threshold_acc=params["threshold_acc"],
-		max_epochs=params["max_epochs"],
-		data_root=params["data_root"],
-		expert=params["expert"],
-		opt_extra_kwargs=params["opt_extra_kwargs"],
-	)
-
-	try:
-		validate_pretrain_config_constraints(
-			pretrain_config,
-			out_dir=params["out_dir"],
-			save=params["save"],
-			model_seeds=params["model_seeds"],
-		)
-	except (ValueError, TypeError) as e:
-		print(f"ERROR: {e}", file=sys.stderr)
-		sys.exit(1)
-
 	try:
 		parse_he_init(params["he_init"])
 	except (TypeError, ValueError) as e:
@@ -265,23 +259,8 @@ def main() -> int:
 
 	device = torch.device(params["device"])
 	print(f"device={device}")
-	run_cfg = PretrainRunConfig(
-		model_class=params["model_class"],
-		model_config=params["model_config"],
-		activation=params["activation"],
-		he_init=params["he_init"],
-		init_epsilon=params["init_epsilon"],
-		base_lr=params["base_lr"],
-		train_k_samples=params["train_k_samples"],
-		threshold_acc=params["threshold_acc"],
-		batch_size=params["batch_size"],
-		max_epochs=params["max_epochs"],
-		dataset_seed=params["dataset_seed"],
-		save=params["save"],
-		out_dir=params["out_dir"],
-		opt_extra_kwargs=params["opt_extra_kwargs"],
-	)
 
+	# The training data split is independent of the learning rate, so build it once.
 	train_ds, _, all_test = build_mnist_train_and_eval(
 		params["train_k_samples"],
 		params["batch_size"],
@@ -295,85 +274,145 @@ def main() -> int:
 		f"model_seeds={params['model_seeds']}"
 	)
 
-	for seed_idx, seed in enumerate(params["model_seeds"]):
+	base_lrs = params["base_lrs"]
+	if len(base_lrs) > 1:
+		print(f"Sweeping base_lrs={base_lrs} ({len(base_lrs)} learning rate(s)).")
+
+	for lr_idx, base_lr in enumerate(base_lrs):
 		print(
-			f"\n########## model_seed {seed} "
-			f"({seed_idx + 1}/{len(params['model_seeds'])}) ##########"
+			f"\n========== base_lr {base_lr} "
+			f"({lr_idx + 1}/{len(base_lrs)}) =========="
 		)
-		for opt_name in optimizer_names:
-			opt_class, opt_kwargs = _resolve_optimizer(
-				opt_name, params["base_lr"], **params["opt_extra_kwargs"]
+		pretrain_config = build_pretrain_config(
+			model_class=params["model_class"],
+			model_config=params["model_config"],
+			activation=params["activation"],
+			optimizer_names=optimizer_names,
+			base_lr=base_lr,
+			batch_size=params["batch_size"],
+			he_init=params["he_init"],
+			init_epsilon=params["init_epsilon"],
+			dataset_seed=params["dataset_seed"],
+			model_seeds=params["model_seeds"],
+			train_k_samples=params["train_k_samples"],
+			threshold_acc=params["threshold_acc"],
+			max_epochs=params["max_epochs"],
+			data_root=params["data_root"],
+			expert=params["expert"],
+			opt_extra_kwargs=params["opt_extra_kwargs"],
+		)
+
+		try:
+			validate_pretrain_config_constraints(
+				pretrain_config,
+				out_dir=params["out_dir"],
+				save=params["save"],
+				model_seeds=params["model_seeds"],
 			)
-			slug = get_extractor(opt_class, **opt_kwargs).optimizer_id()
-			save_root = resolve_save_root(params["out_dir"], slug=slug, seed=seed)
+		except (ValueError, TypeError) as e:
+			print(f"ERROR: {e}", file=sys.stderr)
+			sys.exit(1)
 
-			if params["save"]:
+		run_cfg = PretrainRunConfig(
+			model_class=params["model_class"],
+			model_config=params["model_config"],
+			activation=params["activation"],
+			he_init=params["he_init"],
+			init_epsilon=params["init_epsilon"],
+			base_lr=base_lr,
+			train_k_samples=params["train_k_samples"],
+			threshold_acc=params["threshold_acc"],
+			batch_size=params["batch_size"],
+			max_epochs=params["max_epochs"],
+			dataset_seed=params["dataset_seed"],
+			save=params["save"],
+			out_dir=params["out_dir"],
+			opt_extra_kwargs=params["opt_extra_kwargs"],
+		)
+
+		for seed_idx, seed in enumerate(params["model_seeds"]):
+			print(
+				f"\n########## model_seed {seed} "
+				f"({seed_idx + 1}/{len(params['model_seeds'])}) ##########"
+			)
+			for opt_name in optimizer_names:
+				opt_class, opt_kwargs = _resolve_optimizer(
+					opt_name, base_lr, **params["opt_extra_kwargs"]
+				)
+				slug = get_extractor(opt_class, **opt_kwargs).optimizer_id()
+				save_root = resolve_save_root(params["out_dir"], slug=slug, seed=seed)
+
+				if params["save"]:
+					try:
+						if guard_pretrain_output(
+							save_root,
+							pretrain_config,
+							slug=slug,
+							force=params["force"],
+						):
+							print(
+								f"Skipping existing pretrain checkpoint "
+								f"(optimizer={slug}, base_lr={base_lr}, "
+								f"train_k_samples={params['train_k_samples']}; "
+								f"use --force to re-run): {save_root}",
+								file=sys.stderr,
+							)
+							continue
+					except ConfigConflictError as e:
+						print(f"CONFIG CONFLICT:\n{e}", file=sys.stderr)
+						sys.exit(1)
+
 				try:
-					if guard_pretrain_output(
-						save_root,
-						pretrain_config,
-						slug=slug,
-						force=params["force"],
-					):
-						print(
-							f"Skipping existing pretrain checkpoint "
-							f"(optimizer={slug}, base_lr={params['base_lr']}, "
-							f"train_k_samples={params['train_k_samples']}; "
-							f"use --force to re-run): {save_root}",
-							file=sys.stderr,
+					log_root = resolve_save_root(params["out_dir"], slug=slug, seed=seed)
+					run_name = f"pretrain/{params['model_class']}/{slug}/seed_{seed}"
+					with train_logger(
+						env_file=args.env_file,
+						run_name=run_name,
+						log_dir=log_root / "tensorboard",
+						config={
+							"model": params["model_class"],
+							"optimizer": opt_name,
+							"optimizer_id": slug,
+							"model_seed": seed,
+							"dataset_seed": params["dataset_seed"],
+							"base_lr": base_lr,
+							"train_k_samples": params["train_k_samples"],
+							"threshold_acc": params["threshold_acc"],
+						},
+					) as writer:
+						result = train_optimizer_for_seed(
+							seed,
+							run_cfg=run_cfg,
+							dataset_seed=params["dataset_seed"],
+							train_ds=train_ds,
+							eval_loader=all_test,
+							opt_name=opt_name,
+							opt_class=opt_class,
+							opt_kwargs=opt_kwargs,
+							device=device,
+							train_logger=writer,
 						)
-						continue
-				except ConfigConflictError as e:
-					print(f"CONFIG CONFLICT:\n{e}", file=sys.stderr)
-					sys.exit(1)
+				except Exception as e:
+					print(
+						f"ERROR: base_lr={base_lr} seed={seed} optimizer={opt_name}: {e}",
+						file=sys.stderr,
+					)
+					raise
 
-			try:
-				log_root = resolve_save_root(params["out_dir"], slug=slug, seed=seed)
-				run_name = f"pretrain/{params['model_class']}/{slug}/seed_{seed}"
-				with train_logger(
-					env_file=args.env_file,
-					run_name=run_name,
-					log_dir=log_root / "tensorboard",
-					config={
-						"model": params["model_class"],
-						"optimizer": opt_name,
-						"optimizer_id": slug,
-						"model_seed": seed,
-						"dataset_seed": params["dataset_seed"],
-						"train_k_samples": params["train_k_samples"],
-						"threshold_acc": params["threshold_acc"],
-					},
-				) as writer:
-					result = train_optimizer_for_seed(
-						seed,
+				if run_cfg.save and "save_root" in result:
+					save_pretrained_checkpoint(
+						save_root=save_root,
+						model=result["model"],
+						optimizer=result["optimizer"],
 						run_cfg=run_cfg,
-						dataset_seed=params["dataset_seed"],
-						train_ds=train_ds,
-						eval_loader=all_test,
+						slug=result["slug"],
 						opt_name=opt_name,
 						opt_class=opt_class,
-						opt_kwargs=opt_kwargs,
-						device=device,
-						train_logger=writer,
+						training_result=result,
+						seed=seed,
+						pretrain_config=pretrain_config,
 					)
-			except Exception as e:
-				print(f"ERROR: seed={seed} optimizer={opt_name}: {e}", file=sys.stderr)
-				raise
-
-			if run_cfg.save and "save_root" in result:
-				save_pretrained_checkpoint(
-					save_root=save_root,
-					model=result["model"],
-					optimizer=result["optimizer"],
-					run_cfg=run_cfg,
-					slug=result["slug"],
-					opt_name=opt_name,
-					opt_class=opt_class,
-					training_result=result,
-					seed=seed,
-					pretrain_config=pretrain_config,
-				)
-				save_pretrain_config(save_root, pretrain_config)
+					save_pretrain_config(save_root, pretrain_config)
 
 	print("Done.")
 	return 0

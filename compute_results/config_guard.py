@@ -24,7 +24,9 @@ from compute_results.constants import (
 		DEFAULT_TRAIN_K_SAMPLES,
 		EXPERT_THRESHOLD_ACC,
 		EXPERT_TRAIN_K_SAMPLES,
+		DEFAULT_MULTI_LRS,
 		DEFAULT_MULTI_SEEDS,
+		MULTI_LRS_USE_DEFAULT,
 		MULTI_SEEDS_USE_DEFAULT,
 		PRETRAIN_FINGERPRINT_EXCLUDE_KEYS,
 )
@@ -875,10 +877,10 @@ def save_optimizer_config(
 # Pretrain config (threshold-based MNIST pretraining)
 # ---------------------------------------------------------------------------
 
-def _parse_csv_or_list(value: str | list | int | None) -> list[str]:
+def _parse_csv_or_list(value: str | list | float | int | None) -> list[str]:
 	if value is None:
 		return []
-	if isinstance(value, int):
+	if isinstance(value, (int, float)):
 		return [str(value)]
 	if isinstance(value, list):
 		return [str(x).strip() for x in value if str(x).strip()]
@@ -890,6 +892,11 @@ def _parse_csv_or_list(value: str | list | int | None) -> list[str]:
 def _parse_int_list(value: str | list | int | None) -> list[int]:
 	parts = _parse_csv_or_list(value)
 	return [int(p) for p in parts]
+
+
+def _parse_float_list(value: str | list | float | int | None) -> list[float]:
+	parts = _parse_csv_or_list(value)
+	return [float(p) for p in parts]
 
 
 def _resolve_pretrain_model_seeds(
@@ -916,6 +923,30 @@ def _resolve_pretrain_model_seeds(
 		return [int(seed)]
 
 	return list(DEFAULT_MULTI_SEEDS)
+
+
+def _resolve_pretrain_base_lrs(
+	raw: dict[str, Any],
+	*,
+	cli_multi_lr: str | None,
+	resolved_base_lr: float,
+) -> list[float]:
+	"""Base learning rates to pretrain over.
+
+	Precedence mirrors `_resolve_pretrain_model_seeds`: explicit CLI `--multi_lr`
+	(sentinel -> default sweep list, else CSV) wins, then a `multi_lr` /
+	`multi_lrs` key in the JSON config, else the single *resolved_base_lr*.
+	"""
+	if cli_multi_lr is not None:
+		if cli_multi_lr == MULTI_LRS_USE_DEFAULT:
+			return list(DEFAULT_MULTI_LRS)
+		return _parse_float_list(cli_multi_lr)
+
+	for key in ("multi_lr", "multi_lrs"):
+		if key in raw and raw[key] is not None:
+			return _parse_float_list(raw[key])
+
+	return [float(resolved_base_lr)]
 
 
 def parse_pretrain_inputs(
@@ -948,6 +979,11 @@ def parse_pretrain_inputs(
 	base_lr = raw.get("base_lr", 1e-3)
 	if getattr(cli, "base_lr", None) is not None:
 		base_lr = float(cli.base_lr)
+
+	cli_multi_lr = getattr(cli, "multi_lr", None)
+	base_lrs = _resolve_pretrain_base_lrs(
+		raw, cli_multi_lr=cli_multi_lr, resolved_base_lr=float(base_lr)
+	)
 
 	batch_size = int(raw.get("batch_size", 1))
 	if getattr(cli, "batch_size", None) is not None:
@@ -1035,6 +1071,7 @@ def parse_pretrain_inputs(
 		"activation": activation,
 		"optimizer_names": optimizer_names,
 		"base_lr": float(base_lr),
+		"base_lrs": base_lrs,
 		"batch_size": batch_size,
 		"he_init": he_init,
 		"init_epsilon": init_epsilon,
@@ -1204,12 +1241,12 @@ def guard_pretrain_output(
 ) -> bool:
 	"""Validate stored pretrain metadata against *config*.
 
-	Returns True if the run should be skipped: ``model.pt`` exists and the
-	checkpoint was produced with the same optimizer (``slug``), learning rate,
+	Returns True if the run should be skipped: `model.pt` exists and the
+	checkpoint was produced with the same optimizer (`slug`), learning rate,
 	and training sample count. Other pretrain settings may differ across configs.
 
 	Raises ConfigConflictError when those reuse fields disagree (never
-	overridable with ``--force``).
+	overridable with `--force`).
 	"""
 	model_path = save_root / "model.pt"
 	if not model_path.exists():

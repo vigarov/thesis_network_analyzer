@@ -6,7 +6,8 @@
 #   bash scripts/on_device/pretrain_for_all_configs.sh --expert
 #   bash scripts/on_device/pretrain_for_all_configs.sh --multi-seeds
 #   bash scripts/on_device/pretrain_for_all_configs.sh --multi-seeds 6,7,14
-#   bash scripts/on_device/pretrain_for_all_configs.sh --expert --multi-seeds
+#   bash scripts/on_device/pretrain_for_all_configs.sh --multi-lr 1e-3,1e-2,1e-1
+#   bash scripts/on_device/pretrain_for_all_configs.sh --expert --multi-seeds --multi-lr
 set -euo pipefail
 
 _SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -15,10 +16,11 @@ cd "${_REPO_ROOT}"
 
 EXPERT=false
 MULTI_SEEDS_ARGS=()
+MULTI_LR_ARGS=()
 
 usage() {
 	cat <<'EOF'
-Usage: pretrain_for_all_configs.sh [--expert] [--multi-seeds [SEEDS]]
+Usage: pretrain_for_all_configs.sh [--expert] [--multi-seeds [SEEDS]] [--multi-lr [LRS]]
 
 Run pretrain-models for each input_configs/*.json (skips test.json).
 
@@ -26,6 +28,8 @@ Options (forwarded to pretrain-models):
   --expert              Expert preset: 20000 samples, threshold 0.95
   --multi-seeds         Model weight-init seeds; bare flag uses notebook defaults
   --multi-seeds SEEDS   Comma-separated seed list (e.g. 6,7,14)
+  --multi-lr            Base learning rates; bare flag uses the default sweep
+  --multi-lr LRS        Comma-separated lr list (e.g. 1e-3,1e-2,1e-1)
 EOF
 }
 
@@ -41,6 +45,15 @@ while [[ $# -gt 0 ]]; do
 				shift 2
 			else
 				MULTI_SEEDS_ARGS=(--multi_seeds)
+				shift
+			fi
+			;;
+		--multi-lr)
+			if [[ $# -ge 2 && "${2}" != --* ]]; then
+				MULTI_LR_ARGS=(--multi_lr "${2}")
+				shift 2
+			else
+				MULTI_LR_ARGS=(--multi_lr)
 				shift
 			fi
 			;;
@@ -66,6 +79,9 @@ else
 fi
 if ((${#MULTI_SEEDS_ARGS[@]} > 0)); then
 	PRETRAIN_ARGS+=("${MULTI_SEEDS_ARGS[@]}")
+fi
+if ((${#MULTI_LR_ARGS[@]} > 0)); then
+	PRETRAIN_ARGS+=("${MULTI_LR_ARGS[@]}")
 fi
 
 OUTPUT_DIR="pretrained_models/${OUTPUT_SUBDIR}/!OPT/!SD/"

@@ -34,6 +34,10 @@ INITIAL_MODEL_OPTIMIZER_STATE_FILENAME = "optimizer.pt"
 # Default model weight-init seeds when `--multi_seeds` is passed without a value.
 DEFAULT_MULTI_SEEDS: list[int] = [6, 7, 14, 30, 31, 35, 51, 68, 90, 96]
 
+# Default base learning rates when `--multi_lr` is passed without a value
+# DEFAULT_LR * [{0.5, 1} * {10^(-1) , 10)}]
+DEFAULT_MULTI_LRS: list[float] = [1e-3, 3e-3, 1e-2, 3e-2, 1e-1]
+
 # Keys omitted from pretrain config fingerprint and equality checks.
 PRETRAIN_FINGERPRINT_EXCLUDE_KEYS = frozenset(
 	{
@@ -50,6 +54,9 @@ PRETRAIN_REUSE_KEYS: tuple[str, ...] = ("base_lr", "train_k_samples")
 
 # Sentinel for argparse: bare `--multi_seeds` (no CSV value).
 MULTI_SEEDS_USE_DEFAULT = "<DEFAULT_MULTI_SEEDS>"
+
+# Sentinel for argparse: bare `--multi_lr` (no CSV value).
+MULTI_LRS_USE_DEFAULT = "<DEFAULT_MULTI_LRS>"
 
 # Threshold-based pretraining defaults (see compute_results/pretrain.py).
 BS_LINEAR_BRACKET_THRESHOLD = 80

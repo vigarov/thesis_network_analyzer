@@ -338,28 +338,65 @@ def binary_search_first_threshold_step(
 		mid = (lo + hi) // 2
 		if mid == lo:
 			mid = lo + 1
+		half_lo_mid = (lo + mid) // 2
+		lookahead_snap: dict | None = None
+		lookahead_step: int | None = None
 		probe += 1
 		print(
 			f"[{slug}] BS probe #{probe}: bracket step indices ({lo}, {hi}) "
 			f"≈ ({100 * lo / n:.1f}%, {100 * hi / n:.1f}%] of epoch → train/eval at mid={mid}"
 		)
-		if cached_step == lo:
+		if cached_step == mid:
+			print(
+				f"[{slug}] BS probe #{probe}: resume at step {mid} "
+				f"(already at mid from prior left-branch cache, skip replay)"
+			)
+		elif cached_step == lo:
 			print(
 				f"[{slug}] BS probe #{probe}: resume from step {lo} "
 				f"(train {mid - lo} new steps, skip {lo} replayed steps)"
 			)
-			train_batches_range(model, optimizer, criterion, batches, lo, mid, device)
+			if half_lo_mid > lo:
+				train_batches_range(model, optimizer, criterion, batches, lo, half_lo_mid, device)
+				lookahead_snap = take_snapshot(model, optimizer)
+				lookahead_step = half_lo_mid
+				if mid > half_lo_mid:
+					train_batches_range(
+						model, optimizer, criterion, batches, half_lo_mid, mid, device,
+					)
+			else:
+				train_batches_range(model, optimizer, criterion, batches, lo, mid, device)
 		else:
 			load_snapshot(model, optimizer, snapshot_epoch_start, device)
-			train_first_n_batches(model, optimizer, criterion, batches, mid, device)
+			if half_lo_mid > lo:
+				train_first_n_batches(model, optimizer, criterion, batches, half_lo_mid, device)
+				lookahead_snap = take_snapshot(model, optimizer)
+				lookahead_step = half_lo_mid
+				if mid > half_lo_mid:
+					train_batches_range(
+						model, optimizer, criterion, batches, half_lo_mid, mid, device,
+					)
+			else:
+				train_first_n_batches(model, optimizer, criterion, batches, mid, device)
 		_, acc_mid = full_loader_loss_acc(model, eval_loader, device)
 		print(f"[{slug}] BS probe #{probe}: after {mid} steps, all_test_acc={acc_mid:.6f}")
 		if train_logger is not None:
 			train_logger.add_scalar("phase_b/mid_test_acc", acc_mid, steps_before + mid)
 		if acc_mid >= threshold:
 			hi = mid
-			cached_step = None
-			print(f"[{slug}] BS probe #{probe}: acc >= threshold → hi ← {hi} (search left / earlier steps)")
+			if lookahead_snap is not None and lookahead_step == half_lo_mid:
+				load_snapshot(model, optimizer, lookahead_snap, device)
+				cached_step = lookahead_step
+				print(
+					f"[{slug}] BS probe #{probe}: acc >= threshold → hi ← {hi} "
+					f"(search left; next probe cached at step {cached_step})"
+				)
+			else:
+				cached_step = None
+				print(
+					f"[{slug}] BS probe #{probe}: acc >= threshold → hi ← {hi} "
+					f"(search left / earlier steps)"
+				)
 		else:
 			lo = mid
 			cached_step = mid

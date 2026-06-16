@@ -42,6 +42,22 @@ With explicit arguments:
 Multiple optimizers/models/experiments (CSV lists):
 
 	uv run compute --experiment Exp1,Exp2 --model M1,M2 --optimizer adam,adagrad
+
+Seed / learning-rate sweeps (CLI only; never read from --config):
+
+	# Sweep three seeds (full notebook list with a bare flag):
+	uv run compute --config path/to/config.json --multi_seed 6,7,14
+	uv run compute --config path/to/config.json --multi_seed
+
+	# Sweep learning rates (Adam's lr is derived from each base_lr):
+	uv run compute --config path/to/config.json --multi_lr 1e-3,1e-2,1e-1
+	uv run compute --config path/to/config.json --multi_lr
+
+	# Cross-product of seeds x learning rates:
+	uv run compute --config path/to/config.json --multi_seed 6,7 --multi_lr 1e-3,1e-2
+
+Each seed and each base_lr produce distinct results subdirectories (seed and
+base_lr are part of the training fingerprint; base_lr is also in the optimizer slug).
 """
 
 import argparse
@@ -60,7 +76,13 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
 	sys.path.insert(0, str(_PROJECT_ROOT))
 
-from compute_results.constants import INITIAL_MODEL_OPTIMIZER_SHORTHAND_TO_CLASS
+from compute_results.constants import (
+	DEFAULT_MULTI_LRS,
+	DEFAULT_MULTI_SEEDS,
+	INITIAL_MODEL_OPTIMIZER_SHORTHAND_TO_CLASS,
+	MULTI_LRS_USE_DEFAULT,
+	MULTI_SEEDS_USE_DEFAULT,
+)
 from compute_results.defaults import DEFAULT_LR
 from compute_results.config_guard import (
 	ConfigConflictError,
@@ -102,6 +124,26 @@ def _parse_csv(value: str | list) -> list[str]:
 	if isinstance(value, str):
 		return [p.strip() for p in value.split(",") if p.strip()]
 	return [str(value).strip()]
+
+
+def _resolve_sweep_seeds(cli_multi_seed: str | None, default_seed: int) -> list[int]:
+	"""Seeds to sweep. `None` -> single *default_seed*; sentinel -> notebook
+	default list; otherwise a parsed CSV of seeds (order preserved, dedup-free)."""
+	if cli_multi_seed is None:
+		return [int(default_seed)]
+	if cli_multi_seed == MULTI_SEEDS_USE_DEFAULT:
+		return list(DEFAULT_MULTI_SEEDS)
+	return [int(p) for p in _parse_csv(cli_multi_seed)]
+
+
+def _resolve_sweep_lrs(cli_multi_lr: str | None, default_lr: float) -> list[float]:
+	"""Base learning rates to sweep. `None` -> single *default_lr*; sentinel ->
+	default sweep list; otherwise a parsed CSV of learning rates."""
+	if cli_multi_lr is None:
+		return [float(default_lr)]
+	if cli_multi_lr == MULTI_LRS_USE_DEFAULT:
+		return list(DEFAULT_MULTI_LRS)
+	return [float(p) for p in _parse_csv(cli_multi_lr)]
 
 
 def _resolve_optimizer(name: str, base_lr: float, **kwargs) -> tuple[str, dict]:
@@ -310,6 +352,39 @@ def _parse_args() -> argparse.Namespace:
 	p.add_argument("--base-lr", type=float, default=1e-3)
 	p.add_argument("--batch-size", type=int, default=1)
 	p.add_argument("--seed", type=int, default=3003)
+	p.add_argument(
+		"--multi_seed",
+		"--multi_seeds",
+		dest="multi_seed",
+		nargs="?",
+		const=MULTI_SEEDS_USE_DEFAULT,
+		default=None,
+		metavar="SEEDS",
+		help=(
+			"Sweep multiple training seeds (CLI only, never read from --config). "
+			"Bare flag uses the notebook default list; with a CSV (e.g. 6,7,14) "
+			"overrides the single config/CLI seed. Combined with --multi_lr, runs "
+			"the full seed x lr cross-product. Each seed yields a distinct results "
+			"subdirectory (the seed is part of the training fingerprint)."
+		),
+	)
+	p.add_argument(
+		"--multi_lr",
+		"--multi_lrs",
+		dest="multi_lr",
+		nargs="?",
+		const=MULTI_LRS_USE_DEFAULT,
+		default=None,
+		metavar="LRS",
+		help=(
+			"Sweep multiple base learning rates (CLI only, never read from --config). "
+			"Bare flag uses the default sweep list; with a CSV (e.g. 1e-3,1e-2,1e-1) "
+			"overrides the single config/CLI base_lr. Adam's lr is derived from each "
+			"base_lr exactly as for the single-lr path. Combined with --multi_seed, "
+			"runs the full seed x lr cross-product. Each lr yields a distinct results "
+			"subdirectory (base_lr is part of the fingerprint and the optimizer slug)."
+		),
+	)
 	p.add_argument("--activation", default="relu")
 	p.add_argument(
 		"--loss",
@@ -442,6 +517,17 @@ def main() -> int:
 
 	if args.config is not None:
 		raw = json.loads(args.config.read_text())
+		forbidden_sweep_keys = [
+			k for k in ("multi_seed", "multi_seeds", "multi_lr", "multi_lrs")
+			if k in raw
+		]
+		if forbidden_sweep_keys:
+			print(
+				f"ERROR: {forbidden_sweep_keys} not allowed in --config; "
+				"pass --multi_seed / --multi_lr as CLI arguments instead.",
+				file=sys.stderr,
+			)
+			sys.exit(1)
 		experiment_classes = _parse_csv(raw["experiment_class"])
 		experiment_kwargs = dict(raw.get("experiment_config", {}))
 		if (
@@ -590,82 +676,94 @@ def main() -> int:
 
 	_validate_names(experiment_classes, model_classes, optimizer_names)
 
+	# Sweep lists (CLI-only). Without --multi_seed / --multi_lr these collapse to
+	# the single config/CLI seed and base_lr, preserving the original behavior.
+	sweep_seeds = _resolve_sweep_seeds(args.multi_seed, seed)
+	sweep_lrs = _resolve_sweep_lrs(args.multi_lr, base_lr)
+	if len(sweep_seeds) > 1 or len(sweep_lrs) > 1:
+		print(
+			f"Sweeping seeds={sweep_seeds} x base_lrs={sweep_lrs} "
+			f"({len(sweep_seeds) * len(sweep_lrs)} combination(s))."
+		)
+
+	# Registry class names are independent of the learning rate, so resolve once.
 	opt_registry_classes_for_initial_model: list[str] = [
 		_resolve_optimizer(n, base_lr, **opt_extra_kwargs)[0] for n in optimizer_names
 	]
 
-	# Build cartesian product of tasks
+	# Build cartesian product of tasks: (seed, base_lr) x (experiment, model, optimizer)
 	pretrain_plan_logged: set[str] = set()
 	all_tasks: list[_Task] = []
-	for exp_cls, mod_cls, opt_name in itertools.product(
-		experiment_classes, model_classes, optimizer_names
-	):
-		exp_kw = experiment_kwargs
-		mod_kw = {**model_kwargs}
-		if "activation" not in mod_kw:
-			mod_kw["activation"] = activation
+	for run_seed, run_base_lr in itertools.product(sweep_seeds, sweep_lrs):
+		for exp_cls, mod_cls, opt_name in itertools.product(
+			experiment_classes, model_classes, optimizer_names
+		):
+			exp_kw = experiment_kwargs
+			mod_kw = {**model_kwargs}
+			if "activation" not in mod_kw:
+				mod_kw["activation"] = activation
 
-		experiment = get_experiment(exp_cls, **exp_kw)
-		if exp_cls not in pretrain_plan_logged and type(experiment).has_pretrain:
-			print(
-				f"{exp_cls}: pretraining will use {experiment.pretrain_sample_count()} samples "
-				f"(train pool size {experiment.train_pool_size()})."
-			)
-			pretrain_plan_logged.add(exp_cls)
-		model = get_model(mod_cls, **mod_kw)
-		config = build_training_config(
-			experiment_class=exp_cls,
-			experiment_config=exp_kw,
-			model_class=mod_cls,
-			model_config=mod_kw,
-			trial_epochs=trial_epochs,
-			base_lr=base_lr,
-			batch_size=batch_size,
-			seed=seed,
-			activation=mod_kw.get("activation", activation),
-			checkpoint_cadence=checkpoint_cadence,
-			save_model_cp=save_model_cp,
-			he_init=he_init,
-			init_epsilon=init_epsilon,
-			internal_keep_tensors=internal_keep_tensors,
-			experiment_runs=experiment_runs,
-			experiment_variability=experiment_variability,
-			loss=loss,
-			use_initial_model=use_initial_model,
-			initial_model_mode=initial_model_mode,
-			save_model=save_model,
-			optimizer_registry_classes_for_initial_model=(
-				opt_registry_classes_for_initial_model
-				if str(use_initial_model or "").strip()
-				else None
-			),
-		)
-		exp_dir = results_root / experiment.experiment_id()
-		rid = result_id_for_config(
-			config,
-			experiment_dir=exp_dir,
-			model_id=model.model_id(),
-		)
-		results_dir = exp_dir / rid / model.model_id()
-
-		opt_class, opt_kwargs = _resolve_optimizer(
-			opt_name, base_lr, **opt_extra_kwargs
-		)
-		all_tasks.append(
-			_Task(
+			experiment = get_experiment(exp_cls, **exp_kw)
+			if exp_cls not in pretrain_plan_logged and type(experiment).has_pretrain:
+				print(
+					f"{exp_cls}: pretraining will use {experiment.pretrain_sample_count()} samples "
+					f"(train pool size {experiment.train_pool_size()})."
+				)
+				pretrain_plan_logged.add(exp_cls)
+			model = get_model(mod_cls, **mod_kw)
+			config = build_training_config(
 				experiment_class=exp_cls,
-				experiment_kwargs=exp_kw,
+				experiment_config=exp_kw,
 				model_class=mod_cls,
-				model_kwargs=mod_kw,
-				optimizer_name=opt_name,
-				optimizer_class=opt_class,
-				optimizer_kwargs=opt_kwargs,
-				config=config,
-				seed=seed,
-				results_dir=results_dir,
-				env_file=args.env_file,
+				model_config=mod_kw,
+				trial_epochs=trial_epochs,
+				base_lr=run_base_lr,
+				batch_size=batch_size,
+				seed=run_seed,
+				activation=mod_kw.get("activation", activation),
+				checkpoint_cadence=checkpoint_cadence,
+				save_model_cp=save_model_cp,
+				he_init=he_init,
+				init_epsilon=init_epsilon,
+				internal_keep_tensors=internal_keep_tensors,
+				experiment_runs=experiment_runs,
+				experiment_variability=experiment_variability,
+				loss=loss,
+				use_initial_model=use_initial_model,
+				initial_model_mode=initial_model_mode,
+				save_model=save_model,
+				optimizer_registry_classes_for_initial_model=(
+					opt_registry_classes_for_initial_model
+					if str(use_initial_model or "").strip()
+					else None
+				),
 			)
-		)
+			exp_dir = results_root / experiment.experiment_id()
+			rid = result_id_for_config(
+				config,
+				experiment_dir=exp_dir,
+				model_id=model.model_id(),
+			)
+			results_dir = exp_dir / rid / model.model_id()
+
+			opt_class, opt_kwargs = _resolve_optimizer(
+				opt_name, run_base_lr, **opt_extra_kwargs
+			)
+			all_tasks.append(
+				_Task(
+					experiment_class=exp_cls,
+					experiment_kwargs=exp_kw,
+					model_class=mod_cls,
+					model_kwargs=mod_kw,
+					optimizer_name=opt_name,
+					optimizer_class=opt_class,
+					optimizer_kwargs=opt_kwargs,
+					config=config,
+					seed=run_seed,
+					results_dir=results_dir,
+					env_file=args.env_file,
+				)
+			)
 
 	# Filter: skip existing unless force
 	to_run: list[_Task] = []
@@ -754,7 +852,8 @@ def main() -> int:
 		device_id = i % max(1, torch.cuda.device_count())
 		print(
 			f"Training: {task.experiment_class} / {task.model_class} / "
-			f"{task.optimizer_name}  device={device_id}"
+			f"{task.optimizer_name}  seed={task.seed}  "
+			f"base_lr={task.config['base_lr']}  device={device_id}"
 		)
 		_run_single_task(task, device_id)
 

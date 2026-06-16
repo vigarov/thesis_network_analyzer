@@ -36,6 +36,7 @@ experiments/mnist/cat1/__init__.py
 experiments/mnist/cat1/sample_shuffle_constrained.py
 experiments/mnist/cat1/sample_shuffle_control.py
 experiments/mnist/cat1/sample_shuffle_finetune.py
+experiments/mnist/cat1/sample_shuffle_interleaved.py
 experiments/mnist/cat2/__init__.py
 experiments/mnist/cat2/sequence_control.py
 experiments/mnist/cat2/sequence_labelperm.py
@@ -66,6 +67,7 @@ scripts/__init__.py
 scripts/analyse_sim_results.py
 scripts/pretrain_models.py
 scripts/run_simulation.py
+scripts/slurm/make_array_configs.py
 scripts/utils/__init__.py
 scripts/utils/cluster_utils.py
 visualize_webapp/__init__.py
