@@ -10,9 +10,6 @@ Requires-Dist: numpy>=2.4.3
 Requires-Dist: scipy>=1.14.0
 Requires-Dist: pandas>=2.2
 Requires-Dist: plotly>=6.6.0
-Requires-Dist: torch>=2.9.1
-Requires-Dist: torch-shampoo
-Requires-Dist: torchvision>=0.24.1
 Requires-Dist: tqdm>=4.67.3
 Requires-Dist: scikit-image>=0.26.0
 Requires-Dist: scikit-learn>=1.8.0
