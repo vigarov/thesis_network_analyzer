@@ -11,9 +11,7 @@ dependencies = [
     "scipy>=1.14.0",
     "pandas>=2.2",
     "plotly>=6.6.0",
-    "torch>=2.9.1",
     "torch-shampoo",
-    "torchvision>=0.24.1",
     "tqdm>=4.67.3",
     "scikit-image>=0.26.0",
     "scikit-learn>=1.8.0",
@@ -28,29 +26,7 @@ dependencies = [
 requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
-[[tool.uv.index]]
-name = "pytorch-cu130"
-url = "https://download.pytorch.org/whl/cu130"
-explicit = true
-
-[[tool.uv.index]]
-name = "pytorch-cpu"
-url = "https://download.pytorch.org/whl/cpu"
-explicit = true
-
 [tool.uv.sources]
-torch = [
-  { index = "pytorch-cu130", marker = "sys_platform == 'linux'" },
-]
-#torch = [ # Use for CPU-only
-#  { index = "pytorch-cpu", marker = "sys_platform == 'linux'" },
-#]
-torchvision = [
-  { index = "pytorch-cu130", marker = "sys_platform == 'linux'" },
-]
-#torchvision = [ # Use for CPU-only
-#  { index = "pytorch-cpu", marker = "sys_platform == 'linux'" },
-#]
 torch-shampoo = { git = "https://github.com/facebookresearch/optimizers.git" }
 
 [project.scripts]

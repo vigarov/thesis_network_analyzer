@@ -42,7 +42,20 @@ CONFIG_COUNT="${#CONFIG_FILES[@]}"
 cd "${PROJECT_ROOT}"
 export PATH="${HOME}/.local/bin:${PATH}"
 
+_UV_ENV_READY=false
+
+_run_uv_setup() {
+	module purge
+	module load CUDA/12.6.0 || true
+	export _REPO_ROOT
+	"${_REPO_ROOT}/setup.sh"
+}
+
 run_uv() {
+	if [[ "${_UV_ENV_READY}" != true ]]; then
+		_run_uv_setup
+		_UV_ENV_READY=true
+	fi
 	uv run "$@"
 }
 
