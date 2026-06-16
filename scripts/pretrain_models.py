@@ -145,7 +145,10 @@ def _parse_args() -> argparse.Namespace:
 	p.add_argument(
 		"--force",
 		action="store_true",
-		help="Re-run even when matching outputs exist (config mismatch still errors).",
+		help=(
+			"Re-run even when a matching checkpoint exists (optimizer, learning rate, "
+			"and sample count); mismatches on those fields still error."
+		),
 	)
 	p.add_argument(
 		"--device",
@@ -309,10 +312,14 @@ def main() -> int:
 					if guard_pretrain_output(
 						save_root,
 						pretrain_config,
+						slug=slug,
 						force=params["force"],
 					):
 						print(
-							f"Skipping existing output (use --force to re-run): {save_root}",
+							f"Skipping existing pretrain checkpoint "
+							f"(optimizer={slug}, base_lr={params['base_lr']}, "
+							f"train_k_samples={params['train_k_samples']}; "
+							f"use --force to re-run): {save_root}",
 							file=sys.stderr,
 						)
 						continue

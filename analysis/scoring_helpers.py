@@ -29,6 +29,7 @@ _PRETRAIN_SHUFFLE_MISLABEL_ID = re.compile(
 	r"^cat1_sample_shuffle_control_tr\d+$"
 	r"|^cat1_sample_shuffle_finetune_K\d+_tr\d+$"
 	r"|^cat1_sample_shuffle_constrained_digits[\d-]+_tr\d+$"
+	r"|^cat1_sample_shuffle_interleaved_digits[\d-]+_tr\d+$"
 )
 
 

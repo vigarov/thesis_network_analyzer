@@ -45,6 +45,9 @@ PRETRAIN_FINGERPRINT_EXCLUDE_KEYS = frozenset(
 	}
 )
 
+# Pretrain fields that match to skip re-training
+PRETRAIN_REUSE_KEYS: tuple[str, ...] = ("base_lr", "train_k_samples")
+
 # Sentinel for argparse: bare `--multi_seeds` (no CSV value).
 MULTI_SEEDS_USE_DEFAULT = "<DEFAULT_MULTI_SEEDS>"
 

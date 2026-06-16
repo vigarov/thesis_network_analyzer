@@ -1,7 +1,4 @@
-"""Experiment id → display label mapping and sort order (no label string constants — pass ``ExperimentDisplayLabels``)."""
-
-from __future__ import annotations
-
+"""Experiment id → display label mapping and sort order (no label string constants — pass `ExperimentDisplayLabels`)."""
 from typing import Iterable, NamedTuple
 
 from analysis.scoring_helpers import is_pretrain_shuffle_mislabel_experiment
@@ -79,10 +76,17 @@ def rename_experiments_for_labels(exp_name: str, labels: ExperimentDisplayLabels
 	if s.startswith("digit_"):
 		return labels.no_pretrain
 
-	# --- Cat1 v2 (experiments_new): constrained subset ---
+	# --- Cat1 v2 (experiments_new): constrained / interleaved subset ---
 	_c1con = "cat1_sample_shuffle_constrained_digits"
+	_c1int = "cat1_sample_shuffle_interleaved_digits"
 	if s.startswith(_c1con) and "_tr" in s:
 		mid = s[len(_c1con) :].split("_tr", 1)[0]
+		if mid:
+			digits = tuple(int(p) for p in mid.split("-") if p != "")
+			inner = ",".join(str(d) for d in digits)
+			return r"$\text{Shuffle}_{\{" + inner + r"\}}$"
+	if s.startswith(_c1int) and "_tr" in s:
+		mid = s[len(_c1int) :].split("_tr", 1)[0]
 		if mid:
 			digits = tuple(int(p) for p in mid.split("-") if p != "")
 			inner = ",".join(str(d) for d in digits)
@@ -128,7 +132,7 @@ def two_row_cat12_from_sorted(
 	exps: list[str],
 	labels: ExperimentDisplayLabels,
 ) -> tuple[list[str], list[str], list[str]]:
-	"""Split sorted display labels: Cat1 (sort ranks 100-102), Cat2 sequence (200-205); remainder is ``other``."""
+	"""Split sorted display labels: Cat1 (sort ranks 100-102), Cat2 sequence (200-205); remainder is `other`."""
 	row1 = [e for e in exps if 100 <= experiment_display_sort_rank(e, labels) <= 102]
 	row2 = [e for e in exps if 200 <= experiment_display_sort_rank(e, labels) <= 205]
 	in_rows = set(row1) | set(row2)

@@ -52,3 +52,23 @@ class RelabelSubset(Dataset):
 		x, _ = self._base[self._indices[i]]
 		y = torch.tensor(self._label, dtype=torch.long)
 		return x, y
+
+
+class ExplicitLabelIndexDataset(Dataset):
+	"""``base_ds[idx]`` paired with an explicit integer supervision label."""
+
+	def __init__(
+		self,
+		base_ds: Dataset,
+		entries: list[tuple[int, int]],
+	) -> None:
+		self._base = base_ds
+		self._entries = entries
+
+	def __len__(self) -> int:
+		return len(self._entries)
+
+	def __getitem__(self, i: int) -> tuple[torch.Tensor, torch.Tensor]:
+		idx, label = self._entries[i]
+		x, _ = self._base[idx]
+		return x, torch.tensor(label, dtype=torch.long)

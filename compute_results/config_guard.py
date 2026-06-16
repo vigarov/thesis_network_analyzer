@@ -1,7 +1,4 @@
 """Config schema, fingerprinting, and the compare-existing-config guard."""
-
-from __future__ import annotations
-
 import hashlib
 import json
 import re
@@ -17,9 +14,22 @@ from compute_results.constants import (
 	INITIAL_MODEL_CHECKPOINT_FILENAMES,
 	INITIAL_MODEL_OPTIMIZER_SHORTHAND_TO_CLASS,
 	INITIAL_MODEL_OPTIMIZER_STATE_FILENAME,
+	PRETRAIN_REUSE_KEYS,
 )
 from experiments.base import get_registered_experiment_class
 from experiments.mnist.common.label_perm import parse_restrain_digits
+from compute_results.defaults import SHAMPOO_PRECONDITIONER_EPSILON_KEY
+from compute_results.constants import (
+		DEFAULT_THRESHOLD_ACC,
+		DEFAULT_TRAIN_K_SAMPLES,
+		EXPERT_THRESHOLD_ACC,
+		EXPERT_TRAIN_K_SAMPLES,
+		DEFAULT_MULTI_SEEDS,
+		MULTI_SEEDS_USE_DEFAULT,
+		PRETRAIN_FINGERPRINT_EXCLUDE_KEYS,
+)
+
+from models import parse_he_init
 
 
 def parse_checkpoint_cadence(cadence: str) -> tuple[str, int | None]:
@@ -164,10 +174,15 @@ def validate_experiment_config_constraints(
 		return
 
 	if "restrain_digits" in experiment_config:
-		if cls.__name__ not in ("PretrainThenShuffleMislabel", "Cat1SampleShuffleConstrained"):
+		if cls.__name__ not in (
+			"PretrainThenShuffleMislabel",
+			"Cat1SampleShuffleConstrained",
+			"Cat1SampleShuffleInterleaved",
+		):
 			raise ValueError(
 				f"experiment_config for {experiment_class}: 'restrain_digits' is only supported "
-				"for PretrainThenShuffleMislabel and Cat1SampleShuffleConstrained."
+				"for PretrainThenShuffleMislabel, Cat1SampleShuffleConstrained, "
+				"and Cat1SampleShuffleInterleaved."
 			)
 		parse_restrain_digits(experiment_config.get("restrain_digits"))
 
@@ -276,12 +291,12 @@ def validate_experiment_config_constraints(
 	if cls.__name__ == "PretrainThenShuffleMislabel":
 		rd = parse_restrain_digits(experiment_config.get("restrain_digits"))
 		n_div_pretrain = len(rd) if rd is not None else 10
-	elif cls.__name__ == "Cat1SampleShuffleConstrained":
+	elif cls.__name__ in ("Cat1SampleShuffleConstrained", "Cat1SampleShuffleInterleaved"):
 		rd = parse_restrain_digits(experiment_config.get("restrain_digits"))
 		if rd is None:
 			raise ValueError(
 				f"experiment_config for {experiment_class}: "
-				f"'restrain_digits' is required for Cat1SampleShuffleConstrained."
+				f"'restrain_digits' is required for {cls.__name__}."
 			)
 		n_div_pretrain = len(rd)
 	if pk % n_div_pretrain != 0:
@@ -313,6 +328,19 @@ def validate_experiment_config_constraints(
 				f"by {n_div_pretrain}; got {nt}."
 			)
 
+	if cls.__name__ == "Cat1SampleShuffleInterleaved":
+		cycle_len = 2 * n_div_pretrain
+		if int(nt) % 2 != 0:
+			raise ValueError(
+				f"experiment_config for {experiment_class}: 'num_trial_samples' must be even; "
+				f"got {nt}."
+			)
+		if int(nt) % cycle_len != 0:
+			raise ValueError(
+				f"experiment_config for {experiment_class}: 'num_trial_samples' must be divisible "
+				f"by 2 * len(restrain_digits)={cycle_len}; got {nt}."
+			)
+
 	if cls.__name__ in (
 		"PretrainThenShuffleMislabel",
 		"Cat1SampleShuffleFinetune",
@@ -324,6 +352,16 @@ def validate_experiment_config_constraints(
 				f"experiment_config for {experiment_class}: "
 				f"num_trial_samples * experiment_runs must be divisible by {n_div_pretrain} "
 				f"(balanced post-pretrain pool); got {nt} * {experiment_runs} = {prod}."
+			)
+
+	if cls.__name__ == "Cat1SampleShuffleInterleaved" and experiment_runs is not None:
+		prod = (int(nt) // 2) * int(experiment_runs)
+		if prod % n_div_pretrain != 0:
+			raise ValueError(
+				f"experiment_config for {experiment_class}: "
+				f"(num_trial_samples // 2) * experiment_runs must be divisible by "
+				f"{n_div_pretrain} (balanced restrained post-pretrain pool); "
+				f"got ({nt} // 2) * {experiment_runs} = {prod}."
 			)
 
 	if cls.__name__ == "PretrainControlBase" and int(nt) % 10 != 0:
@@ -859,8 +897,6 @@ def _resolve_pretrain_model_seeds(
 	*,
 	cli_multi_seeds: str | None,
 ) -> list[int]:
-	from compute_results.constants import DEFAULT_MULTI_SEEDS, MULTI_SEEDS_USE_DEFAULT
-
 	if cli_multi_seeds is not None:
 		if cli_multi_seeds == MULTI_SEEDS_USE_DEFAULT:
 			return list(DEFAULT_MULTI_SEEDS)
@@ -888,13 +924,6 @@ def parse_pretrain_inputs(
 	cli: Any,
 ) -> dict[str, Any]:
 	"""Merge JSON config and CLI overrides into normalized pretrain parameters."""
-	from compute_results.defaults import SHAMPOO_PRECONDITIONER_EPSILON_KEY
-	from compute_results.constants import (
-		DEFAULT_THRESHOLD_ACC,
-		DEFAULT_TRAIN_K_SAMPLES,
-		EXPERT_THRESHOLD_ACC,
-		EXPERT_TRAIN_K_SAMPLES,
-	)
 
 	expert = bool(raw.get("expert", False)) or bool(getattr(cli, "expert", False))
 
@@ -945,9 +974,12 @@ def parse_pretrain_inputs(
 	if getattr(cli, "train_k_samples", None) is not None:
 		train_k_samples = int(cli.train_k_samples)
 	elif train_k_samples is None:
-		train_k_samples = EXPERT_TRAIN_K_SAMPLES if expert else DEFAULT_TRAIN_K_SAMPLES
+		train_k_samples = DEFAULT_TRAIN_K_SAMPLES
 	else:
 		train_k_samples = int(train_k_samples)
+	if expert:
+		# always use EXPERT_TRAIN_K_SAMPLES when expert
+		train_k_samples = EXPERT_TRAIN_K_SAMPLES
 
 	threshold_acc = raw.get("threshold_acc")
 	if getattr(cli, "threshold_acc", None) is not None:
@@ -1022,8 +1054,6 @@ def parse_pretrain_inputs(
 
 
 def pretrain_fingerprint_payload(config: dict[str, Any]) -> dict[str, Any]:
-	from compute_results.constants import PRETRAIN_FINGERPRINT_EXCLUDE_KEYS
-
 	return {k: v for k, v in config.items() if k not in PRETRAIN_FINGERPRINT_EXCLUDE_KEYS}
 
 
@@ -1081,8 +1111,6 @@ def validate_pretrain_config_constraints(
 	save: bool,
 	model_seeds: list[int],
 ) -> None:
-	from models import parse_he_init
-
 	pk = int(config["train_k_samples"])
 	if pk < 1:
 		raise ValueError(f"train_k_samples must be >= 1, got {pk}")
@@ -1099,6 +1127,12 @@ def validate_pretrain_config_constraints(
 	if "!OPT" not in out_dir:
 		raise ValueError("out_dir must contain the placeholder '!OPT'.")
 
+	if config.get("expert") and "expert" not in out_dir:
+		raise ValueError(
+			"Expert pretraining requires 'expert' in out_dir "
+			f"(e.g. expert_optimizer_pretrained/); got {out_dir!r}."
+		)
+
 	if save and len(model_seeds) > 1 and "!SD" not in out_dir:
 		raise ValueError("SAVE with multiple model_seeds requires '!SD' in out_dir.")
 
@@ -1108,40 +1142,97 @@ def validate_pretrain_config_constraints(
 	parse_he_init(config["he_init"])
 
 
-def guard_pretrain_output(save_root: Path, config: dict[str, Any], *, force: bool) -> bool:
-	"""Validate stored pretrain config against *config*.
+def _normalize_pretrain_reuse_value(key: str, value: Any) -> Any:
+	if key == "base_lr":
+		return float(value)
+	if key == "train_k_samples":
+		return int(value)
+	return value
 
-	Returns True if the run should be skipped (matching outputs already on disk).
-	Raises ConfigConflictError on fingerprint mismatch (never overridable with --force).
-	"""
+
+def _load_stored_pretrain_metadata(save_root: Path) -> dict[str, Any] | None:
+	"""Load reuse-relevant metadata from a checkpoint directory, if present."""
 	config_path = save_root / "pretrain_config.json"
+	report_path = save_root / "report.json"
+
+	report: dict[str, Any] | None = None
+	if report_path.exists():
+		report = json.loads(report_path.read_text())
+
+	stored: dict[str, Any] | None = None
+	if config_path.exists():
+		stored = dict(json.loads(config_path.read_text()))
+	elif report is not None:
+		stored = dict(report.get("config") or {})
+	else:
+		return None
+
+	if report is not None:
+		opt_id = report.get("optimizer_id")
+		if opt_id:
+			stored["optimizer_id"] = str(opt_id)
+	return stored
+
+
+def _pretrain_reuse_diffs(
+	incoming: dict[str, Any],
+	stored: dict[str, Any],
+	*,
+	slug: str,
+) -> list[str]:
+	diffs: list[str] = []
+	for key in PRETRAIN_REUSE_KEYS:
+		v_in = _normalize_pretrain_reuse_value(key, incoming.get(key))
+		v_st = _normalize_pretrain_reuse_value(key, stored.get(key))
+		if v_in != v_st:
+			diffs.append(f"  {key}: incoming={v_in!r}  stored={v_st!r}")
+
+	stored_slug = stored.get("optimizer_id")
+	if stored_slug is not None and str(stored_slug) != slug:
+		diffs.append(
+			f"  optimizer_id: incoming={slug!r}  stored={stored_slug!r}"
+		)
+	return diffs
+
+
+def guard_pretrain_output(
+	save_root: Path,
+	config: dict[str, Any],
+	*,
+	slug: str,
+	force: bool,
+) -> bool:
+	"""Validate stored pretrain metadata against *config*.
+
+	Returns True if the run should be skipped: ``model.pt`` exists and the
+	checkpoint was produced with the same optimizer (``slug``), learning rate,
+	and training sample count. Other pretrain settings may differ across configs.
+
+	Raises ConfigConflictError when those reuse fields disagree (never
+	overridable with ``--force``).
+	"""
 	model_path = save_root / "model.pt"
 	if not model_path.exists():
 		return False
-	if not config_path.exists():
+
+	stored = _load_stored_pretrain_metadata(save_root)
+	if stored is None:
 		if force:
 			return False
 		raise ConfigConflictError(
-			f"Output exists at {save_root} (model.pt) but no pretrain_config.json; "
-			"use --force to overwrite."
+			f"Output exists at {save_root} (model.pt) but no pretrain_config.json "
+			f"or report.json; use --force to overwrite."
 		)
 
-	stored = dict(json.loads(config_path.read_text()))
-	if pretrain_fingerprint_payload(config) == pretrain_fingerprint_payload(stored):
+	diffs = _pretrain_reuse_diffs(config, stored, slug=slug)
+	if not diffs:
 		return not force
 
-	diffs: list[str] = []
-	pin = pretrain_fingerprint_payload(config)
-	pst = pretrain_fingerprint_payload(stored)
-	for k in sorted(set(pin) | set(pst)):
-		v_in = pin.get(k)
-		v_st = pst.get(k)
-		if v_in != v_st:
-			diffs.append(f"  {k}: incoming={v_in!r}  stored={v_st!r}")
 	msg = (
-		f"Incoming pretrain config conflicts with stored config at {config_path}:\n"
+		f"Existing pretrain checkpoint at {save_root} conflicts with the "
+		f"requested optimizer, learning rate, or sample count:\n"
 		+ "\n".join(diffs)
-		+ "\nConfig mismatches cannot be overridden with --force."
+		+ "\nThese mismatches cannot be overridden with --force."
 	)
 	raise ConfigConflictError(msg)
 

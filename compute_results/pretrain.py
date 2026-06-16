@@ -549,7 +549,7 @@ def resolve_save_root(out_dir_template: str, *, slug: str, seed: int) -> Path:
 		path = out_dir_template.replace("!SD", str(seed))
 	else:
 		path = out_dir_template
-	path = path.replace("!OPT", slug).replace("grafted_shampoo", "graft_shampoo")
+	path = path.replace("!OPT", slug)
 	return Path(path).expanduser()
 
 
