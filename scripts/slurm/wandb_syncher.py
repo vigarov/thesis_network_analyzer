@@ -51,6 +51,77 @@ def _find_offline_runs(root: Path) -> list[Path]:
 	return [path for path in root.rglob("offline-run-*") if path.is_dir()]
 
 
+def _parent_experiment_dir(path: Path) -> Path | None:
+	for parent in path.parents:
+		name = parent.name
+		if name.startswith("cat1") or name.startswith("cat2"):
+			return parent
+	return None
+
+
+def _optimizer_count_for_experiment(exp_dir: Path) -> int | None:
+	counts: list[int] = []
+	for optimizers_dir in exp_dir.glob("*/dnn_5x64/optimizers"):
+		if not optimizers_dir.is_dir():
+			continue
+		counts.append(
+			sum(1 for child in optimizers_dir.iterdir() if child.is_dir())
+		)
+	return max(counts) if counts else None
+
+
+def _init_finished_experiments(root: Path) -> set[Path]:
+	"""Mark experiment dirs that already have the full optimizer set.
+
+	When offline runs exist at startup, infer the expected optimizer count as
+	the maximum across cat1/cat2 experiment dirs, then treat any experiment
+	that already has that many ``dnn_5x64/optimizers`` subdirs as finished
+	(sync skipped; no ``done:`` line is written).
+	"""
+	offline_runs = _find_offline_runs(root)
+	if not offline_runs:
+		return set()
+
+	exp_dirs: set[Path] = set()
+	for run_dir in offline_runs:
+		parent = _parent_experiment_dir(run_dir)
+		if parent is not None:
+			exp_dirs.add(parent.resolve())
+
+	if not exp_dirs:
+		return set()
+
+	counts: dict[Path, int] = {}
+	for exp_dir in exp_dirs:
+		n = _optimizer_count_for_experiment(exp_dir)
+		if n is not None:
+			counts[exp_dir] = n
+
+	if not counts:
+		return set()
+
+	ground_truth = max(counts.values())
+	finished = {exp for exp, n in counts.items() if n == ground_truth}
+	if finished:
+		print(
+			f"Init: expected {ground_truth} optimizer(s); "
+			f"treating {len(finished)} experiment(s) as already finished",
+			flush=True,
+		)
+		for exp in sorted(finished, key=lambda p: p.name):
+			print(f"  skip finished experiment: {exp.name}", flush=True)
+	return finished
+
+
+def _should_sync_run(run_dir: Path, finished_experiments: set[Path]) -> bool:
+	if not finished_experiments:
+		return True
+	parent = _parent_experiment_dir(run_dir)
+	if parent is None:
+		return True
+	return parent.resolve() not in finished_experiments
+
+
 def _wandb_sync(run_dir: Path) -> None:
 	print(f"wandb sync: {run_dir}", flush=True)
 	subprocess.run(
@@ -123,10 +194,14 @@ def main() -> int:
 		flush=True,
 	)
 
+	finished_experiments = _init_finished_experiments(root)
+
 	while not _SHUTDOWN:
 		for run_dir in _find_offline_runs(root):
 			if _SHUTDOWN:
 				break
+			if not _should_sync_run(run_dir, finished_experiments):
+				continue
 			_wandb_sync(run_dir)
 
 		if args.array_count > 0:
