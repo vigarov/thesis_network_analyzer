@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # Submit: sbatch scripts/slurm/simulation.sh
-# Or (login node, wandb sync loop on by default): bash scripts/slurm/simulation.sh [--no-auto-sync] [--auto-sync [SECONDS]]
+# Or (login node, wandb syncher on by default): bash scripts/slurm/simulation.sh [--no-auto-sync] [--auto-sync [SECONDS]]
 #
 # One array task per file in input_configs/*.json
 # Adjust #SBATCH --array to 0-(N-1) where N = number of JSON configs (currently 8 → 0-7).
 
 #SBATCH --job-name=net-simulation
-#SBATCH --time=04:00:00
+#SBATCH --time=02:30:00
 #SBATCH --gpus=1
 #SBATCH --partition=gpu_rtx8000_48gb,gpu_v100_32gb,gpu_a100_40gb,gpu_a100_80gb # gpu_p100_16gb supports cuda 6.0 max -> cuda 12? removing it for now 
 #SBATCH --cpus-per-task=16
@@ -33,3 +33,5 @@ run_uv compute \
 	--config "${CONFIG}" \
 	--output-dir "${RESULTS_DIR}" \
 	--env-file "${ENV_FILE}"
+
+notify_array_task_done

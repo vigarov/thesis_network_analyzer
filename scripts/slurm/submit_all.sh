@@ -8,10 +8,10 @@
 # Slurm log paths (--output / --error) and --array are passed at submit time from common.sh
 # using SLURM_LOG_DIR and the number of input_configs/*.json files.
 #
-# By default, a background loop on the login node periodically runs `wandb sync`
-# on offline runs under RESULTS_DIR / pretrain output / PROJECT_ROOT.
+# By default, a background wandb syncher on the login node periodically runs
+# `wandb sync` on offline runs for the active pipeline stage (pretrain or results).
 # Pass --no-auto-sync to disable, or --auto-sync [SECONDS] to change the interval.
-# The loop stops (with a final sync) when the pipeline succeeds or fails.
+# The syncher restarts between stages and stops when each stage completes.
 
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/common.sh" # Load the common functions
@@ -22,23 +22,17 @@ _SLURM_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 _rc=0
 
 _submit_pipeline() {
-	local pretrain_id sim_id analyse_id
+	_run_slurm_stage_with_sync pretrain "${_SLURM_DIR}/pretrain.sh" || return 1
 
-	pretrain_id="$(_sbatch_with_logs "${_SLURM_DIR}/pretrain.sh")"
-	echo "Submitted pretrain array: ${pretrain_id} (logs under ${SLURM_LOG_DIR})"
-	_wait_for_slurm_job "${pretrain_id}" || return 1
+	_run_slurm_stage_with_sync simulation "${_SLURM_DIR}/simulation.sh" \
+		--dependency="afterok:${LAST_SLURM_JOB_ID}" || return 1
 
-	sim_id="$(_sbatch_with_logs "${_SLURM_DIR}/simulation.sh" --dependency="afterok:${pretrain_id}")"
-	echo "Submitted simulation array: ${sim_id} (after pretrain, logs under ${SLURM_LOG_DIR})"
-	_wait_for_slurm_job "${sim_id}" || return 1
-
-	analyse_id="$(_sbatch_with_logs "${_SLURM_DIR}/analyse.sh" --dependency="afterok:${sim_id}")"
-	echo "Submitted analyse: ${analyse_id} (after simulation, logs under ${SLURM_LOG_DIR})"
-	_wait_for_slurm_job "${analyse_id}" || return 1
+	_run_slurm_stage_with_sync analyse "${_SLURM_DIR}/analyse.sh" \
+		--dependency="afterok:${LAST_SLURM_JOB_ID}" || return 1
 
 	echo "Pipeline completed successfully."
 	return 0
 }
 
-_with_optional_auto_sync _submit_pipeline || _rc=$?
+_submit_pipeline || _rc=$?
 exit "${_rc}"

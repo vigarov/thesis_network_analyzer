@@ -7,7 +7,7 @@ _REPO_ROOT="$(cd "${_SLURM_DIR}/../.." && pwd)"
 
 DEFAULT_AUTO_SYNC_INTERVAL=10
 AUTO_SYNC_INTERVAL=""
-WANDB_AUTO_SYNC_PID=""
+WANDB_SYNCHER_PID=""
 
 # Load paths + W&B variables. Override before sourcing, or set ENV_FILE in the environment.
 ENV_FILE="${ENV_FILE:-${_REPO_ROOT}/.env}"
@@ -30,6 +30,7 @@ set +a
 
 PROJECT_ROOT="$(cd "${PROJECT_ROOT}" && pwd)"
 mkdir -p "${RESULTS_DIR}" "${ANALYSIS_OUTPUT_DIR}" "${SLURM_LOG_DIR}"
+SYNCH_FILE="${PROJECT_ROOT}/.synch"
 
 mapfile -t CONFIG_FILES < <(find "${PROJECT_ROOT}/input_configs" -maxdepth 1 -name '*.json' | sort)
 if ((${#CONFIG_FILES[@]} == 0)); then
@@ -156,52 +157,72 @@ parse_submit_args() {
 	done
 }
 
-_wandb_sync_roots() {
+_pretrain_sync_root() {
 	local pretrain_base="${PRETRAIN_OUTPUT_DIR}"
 	pretrain_base="${pretrain_base%%!OPT*}"
 	pretrain_base="${pretrain_base%%!SD*}"
 	pretrain_base="${pretrain_base%/}"
-
-	printf '%s\n' "${RESULTS_DIR}" "${PROJECT_ROOT}"
-	if [[ -n "${pretrain_base}" ]]; then
-		printf '%s\n' "${pretrain_base}"
-	fi
+	printf '%s' "${pretrain_base}"
 }
 
-_wandb_sync_once() {
-	local root run_dir
-	while IFS= read -r root; do
-		[[ -d "${root}" ]] || continue
-		while IFS= read -r -d '' run_dir; do
-			[[ -f "${run_dir}/.wandb_synced" ]] && continue
-			echo "wandb sync: ${run_dir}"
-			# we don't want to re-setup uv here
-			if uv run wandb sync "${run_dir}" --mark-synced; then
-				: >"${run_dir}/.wandb_synced"
-			fi
-		done < <(find "${root}" -type d -name 'offline-run-*' -print0 2>/dev/null || true)
-	done < <(_wandb_sync_roots)
+_wandb_sync_root_for_stage() {
+	case "${1:?}" in
+	pretrain) _pretrain_sync_root ;;
+	*) printf '%s' "${RESULTS_DIR}" ;;
+	esac
 }
 
 _start_wandb_auto_sync() {
 	local interval="${1:-${DEFAULT_AUTO_SYNC_INTERVAL}}"
-	(
-		while true; do
-			_wandb_sync_once || true
-			sleep "${interval}"
-		done
-	) &
-	WANDB_AUTO_SYNC_PID=$!
-	echo "Started wandb auto-sync (every ${interval}s, pid=${WANDB_AUTO_SYNC_PID})"
+	local array_count="${2:-0}"
+	local sync_root="${3:?}"
+
+	local -a syncher_cmd=(
+		python "${_SLURM_DIR}/wandb_syncher.py"
+		--synch-file "${SYNCH_FILE}"
+		--interval "${interval}"
+		--array-count "${array_count}"
+		--root "${sync_root}"
+	)
+
+	# not uv run, we don't want to load modules from the login node
+	uv run "${syncher_cmd[@]}" &
+	WANDB_SYNCHER_PID=$!
+
+	if ! kill -0 "${WANDB_SYNCHER_PID}" 2>/dev/null; then
+		wait "${WANDB_SYNCHER_PID}" 2>/dev/null || true
+		echo "ERROR: failed to start wandb syncher (is another syncher running?)" >&2
+		return 1
+	fi
+
+	# Syncher exits immediately if .synch already exists (another instance).
+	sleep 0.2
+	if ! kill -0 "${WANDB_SYNCHER_PID}" 2>/dev/null; then
+		wait "${WANDB_SYNCHER_PID}" 2>/dev/null || true
+		WANDB_SYNCHER_PID=""
+		echo "ERROR: wandb syncher did not start (${SYNCH_FILE} may be locked)" >&2
+		return 1
+	fi
+
+	echo "Started wandb syncher (every ${interval}s, array_count=${array_count}, pid=${WANDB_SYNCHER_PID})"
 }
 
 _stop_wandb_auto_sync() {
-	if [[ -n "${WANDB_AUTO_SYNC_PID:-}" ]]; then
-		kill "${WANDB_AUTO_SYNC_PID}" 2>/dev/null || true
-		wait "${WANDB_AUTO_SYNC_PID}" 2>/dev/null || true
-		WANDB_AUTO_SYNC_PID=""
+	if [[ -n "${WANDB_SYNCHER_PID:-}" ]]; then
+		kill "${WANDB_SYNCHER_PID}" 2>/dev/null || true
+		wait "${WANDB_SYNCHER_PID}" 2>/dev/null || true
+		WANDB_SYNCHER_PID=""
 	fi
-	_wandb_sync_once || true
+}
+
+notify_array_task_done() {
+	if [[ -z "${SLURM_ARRAY_TASK_ID:-}" ]]; then
+		return 0
+	fi
+	if [[ ! -f "${SYNCH_FILE}" ]]; then
+		return 0
+	fi
+	echo "done:${SLURM_ARRAY_TASK_ID}" >>"${SYNCH_FILE}"
 }
 
 _wait_for_slurm_job() {
@@ -222,16 +243,29 @@ _wait_for_slurm_job() {
 	return 0
 }
 
-_with_optional_auto_sync() {
-	local rc=0
-	if [[ -n "${AUTO_SYNC_INTERVAL:-}" ]]; then
-		trap '_stop_wandb_auto_sync' EXIT INT TERM
-		_start_wandb_auto_sync "${AUTO_SYNC_INTERVAL}"
+_run_slurm_stage_with_sync() {
+	local stage="${1:?}"
+	local script_path="${2:?}"
+	shift 2
+	local array_count=0 sync_root job_id rc=0
+
+	if _slurm_is_array_stage "${stage}"; then
+		array_count="${CONFIG_COUNT}"
 	fi
-	"$@" || rc=$?
+	sync_root="$(_wandb_sync_root_for_stage "${stage}")"
+
+	if [[ -n "${AUTO_SYNC_INTERVAL:-}" ]]; then
+		_start_wandb_auto_sync "${AUTO_SYNC_INTERVAL}" "${array_count}" "${sync_root}" || return 1
+	fi
+
+	job_id="$(_sbatch_with_logs "${script_path}" "${stage}" "$@")"
+	LAST_SLURM_JOB_ID="${job_id}"
+	echo "Submitted ${job_id} (${script_path}, logs under ${SLURM_LOG_DIR})"
+
+	_wait_for_slurm_job "${job_id}" || rc=$?
+
 	if [[ -n "${AUTO_SYNC_INTERVAL:-}" ]]; then
 		_stop_wandb_auto_sync
-		trap - EXIT INT TERM
 	fi
 	return "${rc}"
 }
@@ -258,12 +292,17 @@ _sbatch_with_logs() {
 _submit_single_job() {
 	local script_path="${1:?}"
 	local stage="${2:-$(_slurm_stage_from_script "${script_path}")}"
-	local job_id rc=0
+	local rc=0
 
-	job_id="$(_sbatch_with_logs "${script_path}" "${stage}")"
-	echo "Submitted ${job_id} (${script_path}, logs under ${SLURM_LOG_DIR})"
+	if [[ -n "${AUTO_SYNC_INTERVAL:-}" ]]; then
+		trap '_stop_wandb_auto_sync' EXIT INT TERM
+	fi
 
-	_with_optional_auto_sync _wait_for_slurm_job "${job_id}" || rc=$?
+	_run_slurm_stage_with_sync "${stage}" "${script_path}" || rc=$?
+
+	if [[ -n "${AUTO_SYNC_INTERVAL:-}" ]]; then
+		trap - EXIT INT TERM
+	fi
 	return "${rc}"
 }
 

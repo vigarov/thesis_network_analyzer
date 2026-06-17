@@ -27,3 +27,5 @@ run_uv pretrain-models \
 	--config "${CONFIG}" \
 	--output-dir "${PRETRAIN_OUTPUT_DIR}" \
 	--env-file "${ENV_FILE}"
+
+notify_array_task_done
