@@ -540,6 +540,16 @@ def _checkpoint_in_bundle_subdir(
 	)
 
 
+def _bundle_location_key(bundle_root: Path, checkpoint: Path) -> str:
+	"""Stable subpath under *bundle_root* for deduplicating optimizer resolutions."""
+	root = bundle_root.resolve()
+	location = checkpoint.parent.resolve()
+	try:
+		return str(location.relative_to(root))
+	except ValueError:
+		return location.name
+
+
 def _validate_initial_model_directory(
 	root: Path,
 	registry_classes: list[str],
@@ -563,7 +573,7 @@ def _validate_initial_model_directory(
 			)
 		seen_registry_classes.add(rc)
 		ckpt = _checkpoint_in_bundle_subdir(root, rc, seed=seed)
-		disk_folder = ckpt.parent.name
+		disk_folder = _bundle_location_key(root, ckpt)
 		if disk_folder in used_disk_subfolders:
 			raise ValueError(
 				f"use_initial_model directory {root}: two optimizers resolved to the same "
