@@ -232,6 +232,7 @@ def _run_single_task(
 		state = load_initial_model_state_dict(
 			init_path,
 			registry_class_name=t.optimizer_class,
+			seed=t.seed,
 		)
 		model.load_state_dict(state, strict=True)
 	else:
@@ -425,8 +426,10 @@ def _parse_args() -> argparse.Namespace:
 			"Load initial weights: a single .pt/.pth file, or a directory with one subfolder per "
 			"requested optimizer (exact extractor class, e.g. AdamExtractor, or a dir whose name "
 			"starts with a CLI shorthand, e.g. adam…). Each subfolder must contain model.pt or "
-			"model.pth (model weights) AND optimizer.pt (optimizer state). Relative to cwd if not "
-			"absolute. Omit for He/Gaussian init. With --config, overrides JSON when set."
+			"model.pth (model weights) AND optimizer.pt (optimizer state). If the directory "
+			"contains a subdirectory named for the training seed (pretrain !SD layout), that "
+			"folder is selected automatically. Relative to cwd if not absolute. Omit for "
+			"He/Gaussian init. With --config, overrides JSON when set."
 		),
 	)
 	p.add_argument(

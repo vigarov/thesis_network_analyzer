@@ -220,6 +220,7 @@ def train_with_config(
 			_init_path,
 			registry_class_name=type(extractor).__name__,
 			map_location=device,
+			seed=seed,
 		)
 		optimizer.load_state_dict(opt_state)
 
