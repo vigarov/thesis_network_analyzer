@@ -22,13 +22,23 @@ _SLURM_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 _rc=0
 
 _submit_pipeline() {
+	local -a dep_args=()
+
 	_run_slurm_stage_with_sync pretrain "${_SLURM_DIR}/pretrain.sh" || return 1
 
+	dep_args=()
+	if [[ -n "${LAST_SLURM_JOB_ID:-}" ]]; then
+		dep_args=(--dependency="afterok:${LAST_SLURM_JOB_ID}")
+	fi
 	_run_slurm_stage_with_sync simulation "${_SLURM_DIR}/simulation.sh" \
-		--dependency="afterok:${LAST_SLURM_JOB_ID}" || return 1
+		"${dep_args[@]}" || return 1
 
+	dep_args=()
+	if [[ -n "${LAST_SLURM_JOB_ID:-}" ]]; then
+		dep_args=(--dependency="afterok:${LAST_SLURM_JOB_ID}")
+	fi
 	_run_slurm_stage_with_sync analyse "${_SLURM_DIR}/analyse.sh" \
-		--dependency="afterok:${LAST_SLURM_JOB_ID}" || return 1
+		"${dep_args[@]}" || return 1
 
 	echo "Pipeline completed successfully."
 	return 0

@@ -33,12 +33,59 @@ mkdir -p "${RESULTS_DIR}" "${ANALYSIS_OUTPUT_DIR}" "${SLURM_LOG_DIR}"
 SYNCH_FILE="${PROJECT_ROOT}/.synch"
 
 mapfile -t CONFIG_FILES < <(find "${PROJECT_ROOT}/input_configs" -maxdepth 1 -name '*.json' | sort)
-if ((${#CONFIG_FILES[@]} == 0)); then
+RAW_CONFIG_COUNT="${#CONFIG_FILES[@]}"
+if ((RAW_CONFIG_COUNT == 0)); then
 	echo "ERROR: no JSON configs under ${PROJECT_ROOT}/input_configs" >&2
 	exit 1
 fi
 
+# Drop configs whose simulation results already exist under RESULTS_DIR.
+# Experiment dirs are named like cat1_sample_shuffle_control_tr100; config files
+# share the same leading token (e.g. cat1_sample_shuffle_control_multi.json).
+_config_family_prefix() {
+	local stem="${1##*/}"
+	stem="${stem%.json}"
+	if [[ "${stem}" =~ ^lr[^_]+_seed[0-9]+_(.+)$ ]]; then
+		stem="${BASH_REMATCH[1]}"
+	fi
+	stem="${stem%_multi}"
+	printf '%s' "${stem}"
+}
+
+_config_has_results() {
+	local prefix="$(_config_family_prefix "${1:?}")"
+	local entry name
+	shopt -s nullglob
+	for entry in "${RESULTS_DIR}"/*/; do
+		name="$(basename "${entry%/}")"
+		if [[ "${name}" == "${prefix}"* ]]; then
+			shopt -u nullglob
+			return 0
+		fi
+	done
+	shopt -u nullglob
+	return 1
+}
+
+_filter_computed_config_files() {
+	local cfg
+	local -a pending=()
+	for cfg in "${CONFIG_FILES[@]}"; do
+		if _config_has_results "${cfg}"; then
+			echo "Skipping already computed config: ${cfg} (results: ${RESULTS_DIR}/$(_config_family_prefix "${cfg}")*)" >&2
+		else
+			pending+=("${cfg}")
+		fi
+	done
+	CONFIG_FILES=("${pending[@]}")
+}
+
+_filter_computed_config_files
+
 CONFIG_COUNT="${#CONFIG_FILES[@]}"
+if ((CONFIG_COUNT == 0)); then
+	echo "All ${RAW_CONFIG_COUNT} config(s) already have results under ${RESULTS_DIR}; no array tasks pending." >&2
+fi
 
 cd "${PROJECT_ROOT}"
 export PATH="${HOME}/.local/bin:${PATH}"
@@ -250,6 +297,11 @@ _run_slurm_stage_with_sync() {
 	local array_count=0 sync_root job_id rc=0
 
 	if _slurm_is_array_stage "${stage}"; then
+		if ((CONFIG_COUNT == 0)); then
+			echo "No pending configs for ${stage}; skipping array job submission."
+			LAST_SLURM_JOB_ID=""
+			return 0
+		fi
 		array_count="${CONFIG_COUNT}"
 	fi
 	sync_root="$(_wandb_sync_root_for_stage "${stage}")"
