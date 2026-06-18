@@ -34,6 +34,8 @@ from analysis.final.final_experiment_display import (
 	two_row_cat12_from_sorted,
 )
 from analysis.plot_helpers import add_trial_boundaries_mpl
+from compute_results.pretrain import resolve_save_root
+
 from analysis.scoring_helpers import (
 	angle_score_function,
 	filter_periods,
@@ -103,13 +105,58 @@ def _is_cat2_recover_reinforce_experiment(eid: str) -> bool:
 	return "cat2_sequence_recover" in s or "cat2_sequence_reinforce" in s
 
 
-def _parse_digit_a_from_config(eid: str, mid: str, rid: str) -> int | None:
+def _load_run_config(eid: str, mid: str, rid: str) -> dict[str, Any]:
 	path = RESULTS / eid / rid / mid / "config.json"
 	if not path.is_file():
-		return None
+		raise FileNotFoundError(f"config.json not found: {path}")
 	try:
 		data = json.loads(path.read_text(encoding="utf-8"))
-	except (OSError, json.JSONDecodeError):
+	except (OSError, json.JSONDecodeError) as exc:
+		raise FileNotFoundError(f"Could not read config.json: {path}") from exc
+	if not isinstance(data, dict):
+		raise FileNotFoundError(f"config.json is not a JSON object: {path}")
+	return data
+
+
+def _parse_seed_from_config(eid: str, mid: str, rid: str) -> int:
+	data = _load_run_config(eid, mid, rid)
+	if "seed" not in data:
+		path = RESULTS / eid / rid / mid / "config.json"
+		raise FileNotFoundError(
+			f"config.json has no 'seed' key (required for expert model lookup): {path}"
+		)
+	return int(data["seed"])
+
+
+def _resolve_expert_dir(
+	root: Path,
+	expert_model_dir: str,
+	oid: str,
+	*,
+	eid: str,
+	mid: str,
+	rid: str,
+) -> Path:
+	"""Expand ``!OPT`` / ``!SD`` using the run's ``config.json`` ``seed``."""
+	seed = _parse_seed_from_config(eid, mid, rid)
+	template = expert_model_dir
+	if "!SD" not in template:
+		template = f"{template.rstrip('/')}/!SD/"
+	expert_dir = resolve_save_root(template, slug=oid, seed=seed)
+	if not expert_dir.is_absolute():
+		expert_dir = root / expert_dir
+	report_path = expert_dir / "report.json"
+	if not report_path.is_file():
+		raise FileNotFoundError(
+			f"Expert model not found: {report_path} (oid={oid!r}, seed={seed})"
+		)
+	return expert_dir
+
+
+def _parse_digit_a_from_config(eid: str, mid: str, rid: str) -> int | None:
+	try:
+		data = _load_run_config(eid, mid, rid)
+	except FileNotFoundError:
 		return None
 	exp_cfg = data.get("experiment_config") or {}
 	if "digitA" not in exp_cfg:
@@ -393,10 +440,13 @@ def collect_final_run_data(
 	_, prebuilt_pyramids = init_cw_ssim_pyramid(device, prebuilt_pyramids)
 
 	required_nids = list(recovery_periods["neuron_id"].unique())
-	expert_dir = root / expert_model_dir.replace("!OPT", oid)
+	expert_dir = _resolve_expert_dir(
+		root, expert_model_dir, oid, eid=eid, mid=mid, rid=rid
+	)
+	expert_cache_key = str(expert_dir.resolve())
 	expert_saliency: dict
-	if expert_saliency_by_oid is not None and oid in expert_saliency_by_oid:
-		expert_saliency = expert_saliency_by_oid[oid]
+	if expert_saliency_by_oid is not None and expert_cache_key in expert_saliency_by_oid:
+		expert_saliency = expert_saliency_by_oid[expert_cache_key]
 		missing = [nid for nid in required_nids if nid not in expert_saliency]
 		if missing:
 			report = json.loads((expert_dir / "report.json").read_text())
@@ -425,7 +475,7 @@ def collect_final_run_data(
 		if torch.cuda.is_available():
 			torch.cuda.empty_cache()
 		if expert_saliency_by_oid is not None:
-			expert_saliency_by_oid[oid] = expert_saliency
+			expert_saliency_by_oid[expert_cache_key] = expert_saliency
 
 	checkpoint_df = get_period_checkpoint_indices(
 		recovery_periods,

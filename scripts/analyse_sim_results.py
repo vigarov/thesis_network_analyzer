@@ -68,8 +68,11 @@ def build_parser() -> argparse.ArgumentParser:
 	p.add_argument(
 		"--expert-model-dir",
 		type=str,
-		default="local/save/expert_optimizer_pretrained/!OPT/",
-		help="Expert saliency models relative to project root (!OPT → optimizer id).",
+		default="pretrained_models/expert/!OPT/",
+		help=(
+			"Expert saliency checkpoints relative to project root "
+			"(!OPT → optimizer id; !SD → config.json seed, appended if omitted)."
+		),
 	)
 	p.add_argument(
 		"--n-checkpoint-samples",
