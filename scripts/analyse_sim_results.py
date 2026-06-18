@@ -7,6 +7,7 @@ writes gzip-pickled checkpoints under `--output-dir`.
 import argparse
 import json
 import sys
+import traceback
 from pathlib import Path
 from typing import Any
 
@@ -119,6 +120,12 @@ def build_parser() -> argparse.ArgumentParser:
 		default=True,
 		help="Use real progression for activation-angle computation.",
 	)
+	p.add_argument(
+		"--verbose-errors",
+		action=argparse.BooleanOptionalAction,
+		default=True,
+		help="Print full tracebacks to stderr when a run fails.",
+	)
 	return p
 
 
@@ -136,6 +143,7 @@ def run_analysis(
 	strict: bool,
 	btsp_start_strategy: str,
 	use_real_progression: bool,
+	verbose_errors: bool,
 ) -> tuple[dict[tuple[str, str, str, str], dict], list[dict[str, Any]]]:
 	set_results_root(input_dir)
 	output_dir.mkdir(parents=True, exist_ok=True)
@@ -187,8 +195,23 @@ def run_analysis(
 							score_factors=score_factors,
 						)
 					except Exception as exc:
+						tb = traceback.format_exc()
+						if verbose_errors:
+							print(
+								f"\n--- analyse failed: eid={eid!r} mid={mid!r} "
+								f"rid={rid!r} oid={oid!r} ---",
+								file=sys.stderr,
+							)
+							print(tb, file=sys.stderr)
 						errors.append(
-							{"eid": eid, "mid": mid, "rid": rid, "oid": oid, "error": repr(exc)}
+							{
+								"eid": eid,
+								"mid": mid,
+								"rid": rid,
+								"oid": oid,
+								"error": repr(exc),
+								"traceback": tb,
+							}
 						)
 						continue
 					if out.get("error"):
@@ -235,11 +258,16 @@ def main(argv: list[str] | None = None) -> int:
 		strict=args.strict,
 		btsp_start_strategy=args.btsp_start_strategy,
 		use_real_progression=args.use_real_progression,
+		verbose_errors=args.verbose_errors,
 	)
 
 	print(f"Loaded/saved {len(all_results)} runs; {len(errors)} errors")
 	if errors:
-		print(pd.DataFrame(errors).to_string(index=False))
+		print(
+			pd.DataFrame(errors)
+			.drop(columns=["traceback"], errors="ignore")
+			.to_string(index=False)
+		)
 		return 1
 	return 0
 

@@ -232,6 +232,7 @@ def _run_single_task(
 		state = load_initial_model_state_dict(
 			init_path,
 			registry_class_name=t.optimizer_class,
+			optimizer_id=extractor.optimizer_id(),
 			seed=t.seed,
 		)
 		model.load_state_dict(state, strict=True)
@@ -689,15 +690,21 @@ def main() -> int:
 			f"({len(sweep_seeds) * len(sweep_lrs)} combination(s))."
 		)
 
-	# Registry class names are independent of the learning rate, so resolve once.
-	opt_registry_classes_for_initial_model: list[str] = [
-		_resolve_optimizer(n, base_lr, **opt_extra_kwargs)[0] for n in optimizer_names
-	]
-
 	# Build cartesian product of tasks: (seed, base_lr) x (experiment, model, optimizer)
 	pretrain_plan_logged: set[str] = set()
 	all_tasks: list[_Task] = []
 	for run_seed, run_base_lr in itertools.product(sweep_seeds, sweep_lrs):
+		use_initial = str(use_initial_model or "").strip()
+		opt_registry_classes_for_initial: list[str] | None = None
+		opt_ids_for_initial: list[str] | None = None
+		if use_initial:
+			opt_registry_classes_for_initial = []
+			opt_ids_for_initial = []
+			for n in optimizer_names:
+				oc, ok = _resolve_optimizer(n, run_base_lr, **opt_extra_kwargs)
+				opt_registry_classes_for_initial.append(oc)
+				opt_ids_for_initial.append(get_extractor(oc, **ok).optimizer_id())
+
 		for exp_cls, mod_cls, opt_name in itertools.product(
 			experiment_classes, model_classes, optimizer_names
 		):
@@ -714,6 +721,9 @@ def main() -> int:
 				)
 				pretrain_plan_logged.add(exp_cls)
 			model = get_model(mod_cls, **mod_kw)
+			opt_class, opt_kwargs = _resolve_optimizer(
+				opt_name, run_base_lr, **opt_extra_kwargs
+			)
 			config = build_training_config(
 				experiment_class=exp_cls,
 				experiment_config=exp_kw,
@@ -735,11 +745,8 @@ def main() -> int:
 				use_initial_model=use_initial_model,
 				initial_model_mode=initial_model_mode,
 				save_model=save_model,
-				optimizer_registry_classes_for_initial_model=(
-					opt_registry_classes_for_initial_model
-					if str(use_initial_model or "").strip()
-					else None
-				),
+				optimizer_registry_classes_for_initial_model=opt_registry_classes_for_initial,
+				optimizer_ids_for_initial_model=opt_ids_for_initial,
 			)
 			exp_dir = results_root / experiment.experiment_id()
 			rid = result_id_for_config(
@@ -749,9 +756,6 @@ def main() -> int:
 			)
 			results_dir = exp_dir / rid / model.model_id()
 
-			opt_class, opt_kwargs = _resolve_optimizer(
-				opt_name, run_base_lr, **opt_extra_kwargs
-			)
 			all_tasks.append(
 				_Task(
 					experiment_class=exp_cls,

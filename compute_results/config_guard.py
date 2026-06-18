@@ -441,13 +441,21 @@ def _checkpoint_file_in_dir(directory: Path) -> Path | None:
 	return None
 
 
-def _initial_bundle_probe_order(registry_class_name: str) -> list[tuple[str, bool]]:
+def _initial_bundle_probe_order(
+	registry_class_name: str,
+	*,
+	optimizer_id: str | None = None,
+) -> list[tuple[str, bool]]:
 	"""(probe_name, is_exact_registry_class). Registry class is matched by exact dirname only;
 	shorthands match any immediate child directory whose name *starts with* the shorthand."""
 	rc = registry_class_name.strip()
 	if not rc:
 		return []
-	out: list[tuple[str, bool]] = [(rc, True)]
+	out: list[tuple[str, bool]] = []
+	oid = str(optimizer_id or "").strip()
+	if oid:
+		out.append((oid, True))
+	out.append((rc, True))
 	seen_shorthand: set[str] = set()
 	for shorthand, cls in sorted(INITIAL_MODEL_OPTIMIZER_SHORTHAND_TO_CLASS.items()):
 		if cls == rc and shorthand not in seen_shorthand:
@@ -457,7 +465,11 @@ def _initial_bundle_probe_order(registry_class_name: str) -> list[tuple[str, boo
 
 
 def _bundle_subdirs_for_probe(
-	bundle_root: Path, probe_name: str, *, exact: bool
+	bundle_root: Path,
+	probe_name: str,
+	*,
+	exact: bool,
+	optimizer_id: str | None = None,
 ) -> list[Path]:
 	"""Resolve to zero or one subfolder path(s) for this probe (see `_initial_bundle_probe_order`)."""
 	if exact:
@@ -469,6 +481,18 @@ def _bundle_subdirs_for_probe(
 		if p.is_dir() and p.name.startswith(probe_name)
 	)
 	if len(matches) > 1:
+		oid = str(optimizer_id or "").strip()
+		if oid:
+			by_id = [m for m in matches if m.name == oid]
+			if len(by_id) == 1:
+				return by_id
+			if len(by_id) == 0:
+				names = [m.name for m in matches]
+				raise ValueError(
+					f"use_initial_model directory {bundle_root}: no subfolder {oid!r} among "
+					f"shorthand {probe_name!r} matches {names!r}; check the run learning rate "
+					f"matches a pretrained checkpoint."
+				)
 		names = [m.name for m in matches]
 		raise ValueError(
 			f"use_initial_model directory {bundle_root}: multiple subfolders start with "
@@ -482,6 +506,7 @@ def _checkpoint_in_bundle_subdir(
 	registry_class_name: str,
 	*,
 	seed: int | None = None,
+	optimizer_id: str | None = None,
 ) -> Path:
 	"""Resolve a model checkpoint under *bundle_root*.
 
@@ -490,8 +515,9 @@ def _checkpoint_in_bundle_subdir(
 	1. If *seed* is set and ``bundle_root / str(seed)`` exists, use that directory.
 	2. If ``model.pt`` / ``model.pth`` lies directly in that directory (pretrain
 	   ``!OPT/!SD`` layout after ``!OPT`` expansion), return it.
-	3. Otherwise probe per-optimizer subfolders (exact registry class name, then CLI
-	   shorthand prefix). After each match, apply step 1 again on that subfolder.
+	3. Otherwise probe per-optimizer subfolders (exact ``optimizer_id`` when given,
+	   then exact registry class name, then CLI shorthand prefix). After each match,
+	   apply step 1 again on that subfolder.
 	"""
 	rc = registry_class_name.strip()
 	if not rc:
@@ -501,10 +527,12 @@ def _checkpoint_in_bundle_subdir(
 	if flat is not None:
 		return flat
 
-	probe_order = _initial_bundle_probe_order(rc)
+	probe_order = _initial_bundle_probe_order(rc, optimizer_id=optimizer_id)
 	last_nonempty_dir: str | None = None
 	for probe_name, exact in probe_order:
-		subs = _bundle_subdirs_for_probe(root, probe_name, exact=exact)
+		subs = _bundle_subdirs_for_probe(
+			root, probe_name, exact=exact, optimizer_id=optimizer_id
+		)
 		if not subs:
 			continue
 		sub = _resolve_seed_subdirectory(subs[0], seed)
@@ -513,7 +541,10 @@ def _checkpoint_in_bundle_subdir(
 		if ckpt is not None:
 			for other_name, other_exact in probe_order:
 				for opath in _bundle_subdirs_for_probe(
-					root, other_name, exact=other_exact
+					root,
+					other_name,
+					exact=other_exact,
+					optimizer_id=optimizer_id,
 				):
 					opath_resolved = _resolve_seed_subdirectory(opath, seed)
 					if opath_resolved.resolve() == sub.resolve():
@@ -554,6 +585,7 @@ def _validate_initial_model_directory(
 	root: Path,
 	registry_classes: list[str],
 	*,
+	optimizer_ids: list[str] | None = None,
 	seed: int | None = None,
 ) -> str:
 	if not registry_classes:
@@ -565,14 +597,18 @@ def _validate_initial_model_directory(
 	used_disk_subfolders: set[str] = set()
 	resolved_disk_folder: dict[str, str] = {}
 	parts: list[tuple[str, str, str]] = []
-	for registry_class in registry_classes:
+	oids = list(optimizer_ids or ())
+	for i, registry_class in enumerate(registry_classes):
 		rc = registry_class.strip()
 		if rc in seen_registry_classes:
 			raise ValueError(
 				f"use_initial_model directory {root}: duplicate optimizer {rc!r} in the run."
 			)
 		seen_registry_classes.add(rc)
-		ckpt = _checkpoint_in_bundle_subdir(root, rc, seed=seed)
+		oid = oids[i].strip() if i < len(oids) else None
+		ckpt = _checkpoint_in_bundle_subdir(
+			root, rc, seed=seed, optimizer_id=oid or None
+		)
 		disk_folder = _bundle_location_key(root, ckpt)
 		if disk_folder in used_disk_subfolders:
 			raise ValueError(
@@ -602,6 +638,7 @@ def validate_initial_model_path(
 	path_str: str,
 	*,
 	optimizer_registry_classes: list[str] | None = None,
+	optimizer_ids: list[str] | None = None,
 	seed: int | None = None,
 ) -> str:
 	"""Verify *path_str* and return a SHA-256 fingerprint for the initial weights.
@@ -630,7 +667,10 @@ def validate_initial_model_path(
 		return digest
 	if path.is_dir():
 		return _validate_initial_model_directory(
-			path, list(optimizer_registry_classes or ()), seed=seed
+			path,
+			list(optimizer_registry_classes or ()),
+			optimizer_ids=optimizer_ids,
+			seed=seed,
 		)
 	raise ValueError(
 		f"use_initial_model must be a .pt/.pth file or a directory of per-optimizer checkpoints, "
@@ -654,6 +694,7 @@ def load_initial_model_state_dict(
 	path_str: str,
 	*,
 	registry_class_name: str = "",
+	optimizer_id: str | None = None,
 	seed: int | None = None,
 ) -> dict[str, Any]:
 	"""Load model `state_dict` from *path_str* (relative to cwd if not absolute).
@@ -669,7 +710,9 @@ def load_initial_model_state_dict(
 		return torch.load(path, map_location="cpu", weights_only=True)
 	if base.is_dir():
 		rc = _require_bundle_registry_class("load_initial_model_state_dict", registry_class_name)
-		ckpt = _checkpoint_in_bundle_subdir(base, rc, seed=seed)
+		ckpt = _checkpoint_in_bundle_subdir(
+			base, rc, seed=seed, optimizer_id=optimizer_id
+		)
 		return torch.load(ckpt, map_location="cpu", weights_only=True)
 	raise ValueError(f"use_initial_model path is not a file or directory: {base}")
 
@@ -678,6 +721,7 @@ def load_initial_optimizer_state_dict(
 	path_str: str,
 	*,
 	registry_class_name: str,
+	optimizer_id: str | None = None,
 	map_location: Any = "cpu",
 	seed: int | None = None,
 ) -> dict[str, Any]:
@@ -694,7 +738,9 @@ def load_initial_optimizer_state_dict(
 			f"load_initial_optimizer_state_dict: expected a bundle directory, got: {base}"
 		)
 	rc = _require_bundle_registry_class("load_initial_optimizer_state_dict", registry_class_name)
-	ckpt = _checkpoint_in_bundle_subdir(base, rc, seed=seed)
+	ckpt = _checkpoint_in_bundle_subdir(
+		base, rc, seed=seed, optimizer_id=optimizer_id
+	)
 	opt_path = ckpt.parent / INITIAL_MODEL_OPTIMIZER_STATE_FILENAME
 	if not opt_path.is_file():
 		raise ValueError(
@@ -767,6 +813,7 @@ def build_training_config(
 	initial_model_mode: str = "init",
 	save_model: str = "",
 	optimizer_registry_classes_for_initial_model: list[str] | None = None,
+	optimizer_ids_for_initial_model: list[str] | None = None,
 ) -> dict[str, Any]:
 	parse_checkpoint_cadence(checkpoint_cadence)
 	if experiment_runs < 1:
@@ -779,6 +826,7 @@ def build_training_config(
 		sha = validate_initial_model_path(
 			path_for_io,
 			optimizer_registry_classes=optimizer_registry_classes_for_initial_model,
+			optimizer_ids=optimizer_ids_for_initial_model,
 			seed=seed,
 		)
 	config: dict[str, Any] = {

@@ -219,6 +219,7 @@ def train_with_config(
 		opt_state = load_initial_optimizer_state_dict(
 			_init_path,
 			registry_class_name=type(extractor).__name__,
+			optimizer_id=extractor.optimizer_id(),
 			map_location=device,
 			seed=seed,
 		)
