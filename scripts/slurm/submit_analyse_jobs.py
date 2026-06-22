@@ -52,7 +52,7 @@ _SLURM_TEMPLATE = """\
 #SBATCH --gpus={gpus}
 #SBATCH --cpus-per-task={cpus_per_task}
 #SBATCH --mem={mem}
-
+{partition_line}
 set -euo pipefail
 source scripts/slurm/common.sh
 
@@ -188,6 +188,12 @@ def _format_extra_analyse_args(args: argparse.Namespace) -> tuple[str, list[str]
 	return "\n".join(lines), cli_args
 
 
+def _partition_line(partition: str | None) -> str:
+	if not partition:
+		return ""
+	return f"#SBATCH --partition={partition}"
+
+
 def render_slurm_script(
 	job: ExperimentOptimizerJob,
 	*,
@@ -195,6 +201,7 @@ def render_slurm_script(
 	gpus: int,
 	cpus_per_task: int,
 	mem: str,
+	partition: str | None,
 	extra_analyse_args: str,
 ) -> str:
 	return _SLURM_TEMPLATE.format(
@@ -206,6 +213,7 @@ def render_slurm_script(
 		gpus=gpus,
 		cpus_per_task=cpus_per_task,
 		mem=mem,
+		partition_line=_partition_line(partition),
 		eid_quoted=_bash_quote(job.eid),
 		oid_quoted=_bash_quote(job.oid),
 		extra_analyse_args=extra_analyse_args,
@@ -220,6 +228,7 @@ def write_job_script(
 	gpus: int,
 	cpus_per_task: int,
 	mem: str,
+	partition: str | None,
 	extra_analyse_args: str,
 ) -> Path:
 	scripts_dir.mkdir(parents=True, exist_ok=True)
@@ -230,6 +239,7 @@ def write_job_script(
 		gpus=gpus,
 		cpus_per_task=cpus_per_task,
 		mem=mem,
+		partition=partition,
 		extra_analyse_args=extra_analyse_args,
 	)
 	script_path.write_text(content, encoding="utf-8")
@@ -381,6 +391,14 @@ def build_parser() -> argparse.ArgumentParser:
 		help="Slurm --mem per shard job (default: 16G).",
 	)
 	p.add_argument(
+		"--partition",
+		default=None,
+		help=(
+			"Slurm --partition for each shard job "
+			"(comma-separated list allowed, e.g. gpu_a100_40gb,gpu_v100_32gb)."
+		),
+	)
+	p.add_argument(
 		"--expert-model-dir",
 		type=str,
 		default=None,
@@ -501,6 +519,7 @@ def main(argv: list[str] | None = None) -> int:
 			gpus=args.gpus,
 			cpus_per_task=args.cpus_per_task,
 			mem=args.mem,
+			partition=args.partition,
 			extra_analyse_args=extra_analyse_args,
 		)
 		job_name = _slurm_job_name(job.eid, job.oid)
