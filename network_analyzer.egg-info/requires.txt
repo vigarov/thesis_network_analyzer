@@ -12,3 +12,6 @@ seaborn>=0.13.2
 wandb>=0.27.2
 tensorboard>=2.20.0
 python-dotenv>=1.2.2
+torch>=2.12.1
+torchvision>=0.27.1
+torch-shampoo>=1.0.0
