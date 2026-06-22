@@ -147,6 +147,8 @@ def run_analysis(
 	btsp_start_strategy: str,
 	use_real_progression: bool,
 	verbose_errors: bool,
+	experiment_id: str | None = None,
+	optimizer_id: str | None = None,
 ) -> tuple[dict[tuple[str, str, str, str], dict], list[dict[str, Any]]]:
 	set_results_root(input_dir)
 	output_dir.mkdir(parents=True, exist_ok=True)
@@ -158,9 +160,13 @@ def run_analysis(
 	errors: list[dict[str, Any]] = []
 
 	for eid, models in tqdm(sorted(tree.items()), desc="Experiments"):
+		if experiment_id is not None and eid != experiment_id:
+			continue
 		for mid, runs in sorted(models.items()):
 			for rid, oids in sorted(runs.items()):
 				for oid in oids:
+					if optimizer_id is not None and oid != optimizer_id:
+						continue
 					key = (eid, mid, oid, rid)
 					loaded = _load_run_checkpoint(str(output_dir), eid, mid, oid, rid)
 					if loaded is not None:
