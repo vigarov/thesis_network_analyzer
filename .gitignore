@@ -10,3 +10,7 @@ to_delete/
 test.json
 * copy *.ipynb
 pretrained_models
+
+# Uncommen on cluster
+# uv.lock
+# pyproject.toml
