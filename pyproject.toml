@@ -19,14 +19,39 @@ dependencies = [
     "wandb>=0.27.2",
     "tensorboard>=2.20.0",
     "python-dotenv>=1.2.2",
+    "torch>=2.12.1",
+    "torchvision>=0.27.1",
+    "torch-shampoo>=1.0.0",
 ]
 
 [build-system]
 requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
+[[tool.uv.index]]
+name = "pytorch-cu126"
+url = "https://download.pytorch.org/whl/cu126"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
 [tool.uv.sources]
+torch = [
+  { index = "pytorch-cu130", marker = "sys_platform == 'linux'" },
+]
+torchvision = [
+  { index = "pytorch-cu130", marker = "sys_platform == 'linux'" },
+]
 torch-shampoo = { git = "https://github.com/facebookresearch/optimizers.git" }
+
 
 [project.scripts]
 compute = "scripts.run_simulation:main"
