@@ -69,6 +69,7 @@ scripts/pretrain_models.py
 scripts/run_simulation.py
 scripts/slurm/analyse_one.py
 scripts/slurm/make_array_configs.py
+scripts/slurm/min_max_individual.py
 scripts/slurm/submit_analyse_jobs.py
 scripts/slurm/wandb_syncher.py
 scripts/utils/__init__.py
