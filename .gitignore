@@ -1,6 +1,6 @@
 __pycache__/
 data/
-results*/
+results*
 local/
 README.md
 *.ipynb_checkpoints
