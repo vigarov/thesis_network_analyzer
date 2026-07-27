@@ -4,11 +4,11 @@ Shampoo supplies the direction; AdaGrad supplies the step size.
 
 Per-unit signals (gradient signals inherited from base):
 - grad_norm, grad_cosine_sim
-- h_inv_norm: derived from inverse-factor blocks (same as PureShampoo)
+- h_inv_norm: per-unit ||L^{-1/4}[i, :]||_2 · ||R^{-1/4}||_F (same as PureShampoo)
 - effective_lr: per-weight lr / (sqrt(accumulator) + eps) from the
   AdaGrad grafter, analogous to AdaGradExtractor.
 
-Global block signals (via on_after_step_blocks):
+Global block signals (via on_after_step_shampoo_blocks):
 - h_inv__{param}__L / __R: inverse Kronecker factor matrices (paper notation)
   for each preconditioned parameter (weights and biases).
 """
@@ -37,7 +37,10 @@ from distributed_shampoo import (
 from distributed_shampoo.shampoo_types import SingleDeviceDistributedConfig
 
 from optimizers.base import OptimizerSignalExtractor, register_extractor
-from optimizers.pure_shampoo_extractor import _extract_h_inv_blocks
+from optimizers.pure_shampoo_extractor import (
+	_compute_h_inv_norms_by_unit,
+	_extract_h_inv_blocks,
+)
 
 ADAGRAD_KEY = "adagrad"
 
@@ -154,14 +157,17 @@ class GraftedShampooExtractor(OptimizerSignalExtractor):
 		self, model: nn.Module, optimizer: torch.optim.Optimizer,
 	) -> dict[str, Any]:
 		assert isinstance(optimizer, DistributedShampoo)
-		blocks, h_inv = _extract_h_inv_blocks(optimizer, model)
-		self._pending_block_signals = blocks
+		self._pending_block_signals = _extract_h_inv_blocks(
+			optimizer, model, units=self._units,
+		)
 		return {
-			"h_inv_norm": {u["node_id"]: h_inv for u in self._units},
+			"h_inv_norm": _compute_h_inv_norms_by_unit(
+				optimizer, model, self._units,
+			),
 			"effective_lr": self._extract_grafting_effective_lr(model, optimizer),
 		}
 
-	def on_after_step_blocks(
+	def on_after_step_shampoo_blocks(
 		self, model: nn.Module, optimizer: torch.optim.Optimizer,
 	) -> dict[str, np.ndarray]:
 		return dict(self._pending_block_signals)

@@ -18,7 +18,7 @@ class OptimizerSignalExtractor(abc.ABC):
 
 	Per-unit signals map `{node_id: scalar | 1-D ndarray}` (e.g. per-weight effective LR).
 	Global block signals (Shampoo inverse-factor matrices) are returned from
-	`on_after_step_blocks` as `{block_key: 2-D ndarray}`.
+	`on_after_step_shampoo_blocks` as `{block_key: 2-D ndarray}`.
 	"""
 
 	def __init__(self) -> None:
@@ -26,7 +26,7 @@ class OptimizerSignalExtractor(abc.ABC):
 		self._prev_grads: dict[str, torch.Tensor] = {}
 
 	def set_units(self, units: list[dict[str, Any]]) -> None:
-		"""Register the clickable units from the model (call before training)."""
+		"""Register the tracked units from the model (call before training)."""
 		self._units = units
 
 	@staticmethod
