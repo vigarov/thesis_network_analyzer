@@ -15,6 +15,9 @@ FINGERPRINT_EXCLUDE_KEYS = frozenset(
 # placeholder expanded to all available optimizers/experiments (depending on context)
 ALL_AVAILABLE_SELECTION = "all"
 
+# Default dataset when a config/CLI does not specify 
+DEFAULT_DATASET = "mnist"
+
 # Human-friendly optimizer CLI names -> registry extractor class name.
 # Kept in sync with `OPTIMIZER_SHORTHAND` in `run_simulation` (derived from this dict).
 INITIAL_MODEL_OPTIMIZER_SHORTHAND_TO_CLASS: dict[str, str] = {
@@ -50,7 +53,12 @@ PRETRAIN_FINGERPRINT_EXCLUDE_KEYS = frozenset(
 )
 
 # Pretrain fields that match to skip re-training
-PRETRAIN_REUSE_KEYS: tuple[str, ...] = ("base_lr", "train_k_samples")
+PRETRAIN_REUSE_KEYS: tuple[str, ...] = (
+	"base_lr",
+	"train_k_samples",
+	"model_class",
+	"dataset",
+)
 
 # Sentinel for argparse: bare `--multi_seeds` (no CSV value).
 MULTI_SEEDS_USE_DEFAULT = "<DEFAULT_MULTI_SEEDS>"
@@ -63,4 +71,6 @@ BS_LINEAR_BRACKET_THRESHOLD = 80
 DEFAULT_TRAIN_K_SAMPLES = 1000
 DEFAULT_THRESHOLD_ACC = 0.8
 EXPERT_TRAIN_K_SAMPLES = 20000
+EXPERT_TRAIN_K_SAMPLES_CIFAR10 = 40000
 EXPERT_THRESHOLD_ACC = 0.95
+EXPERT_THRESHOLD_ACC_CIFAR10 = 0.7

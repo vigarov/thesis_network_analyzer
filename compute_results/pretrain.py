@@ -1,4 +1,4 @@
-"""Threshold-based MNIST pretraining (Phase A epochs + Phase B binary search)."""
+"""Threshold-based pretraining (Phase A epochs + Phase B binary search)."""
 import copy
 from dataclasses import dataclass
 from pathlib import Path
@@ -8,12 +8,12 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, Subset
 from torch.utils.tensorboard import SummaryWriter
-from torchvision import datasets, transforms
 from tqdm import tqdm
 
 from compute_results.config_guard import build_pretrain_report, save_pretrain_report
 from compute_results.constants import BS_LINEAR_BRACKET_THRESHOLD
-from experiments.mnist.base import DATA_ROOT, digit_indices, make_loader
+from experiments.dataset_registry import DATA_ROOT, load_train_test_datasets
+from experiments.mnist.base import digit_indices, make_loader
 from models import apply_model_weight_init, get_model
 from optimizers import get_extractor
 
@@ -38,30 +38,28 @@ class PretrainRunConfig:
 	opt_extra_kwargs: dict[str, Any]
 
 
-def build_mnist_train_and_eval(
+def build_train_and_eval(
 	train_k_samples: int,
 	batch_size: int,
 	*,
 	dataset_seed: int,
+	dataset: str = "mnist",
+	input_size: int | None = None,
+	normalization: str | None = None,
+	data_root: str = DATA_ROOT,
 ) -> tuple[Subset, DataLoader, DataLoader]:
-	"""Mirror `MNISTWrapper._ensure_datasets` (train stats, eval holdout, uniform K).
+	"""Mirror `MNISTWrapper._ensure_datasets` (eval holdout, uniform K) for any dataset.
 
-	Per-digit train pools are shuffled with *dataset_seed* before taking the first
-	`K // 10` indices (after eval holdout).
+	The transform is resolved from `(dataset, input_size, normalization)`. Per-class train
+	pools are shuffled with *dataset_seed* before taking the first `K // 10` indices
+	(after eval holdout).
 	"""
 	n_digits = 10
-	raw_train = datasets.MNIST(
-		root=DATA_ROOT, train=True, download=True, transform=transforms.ToTensor(),
-	)
-	pixels = raw_train.data.float() / 255.0
-	mean, std = pixels.mean().item(), pixels.std().item()
-	tfm = transforms.Compose([transforms.ToTensor(), transforms.Normalize((mean,), (std,))])
-
-	full_train = datasets.MNIST(
-		root=DATA_ROOT, train=True, download=True, transform=tfm,
-	)
-	test_ds = datasets.MNIST(
-		root=DATA_ROOT, train=False, download=True, transform=tfm,
+	full_train, test_ds = load_train_test_datasets(
+		dataset,
+		data_root,
+		input_size=input_size,
+		normalization=normalization,
 	)
 
 	all_digits = tuple(range(n_digits))
@@ -96,9 +94,8 @@ def build_mnist_train_and_eval(
 
 	test_by_digit = digit_indices(test_ds, all_digits)
 	all_test_idx = sum(test_by_digit.values(), [])
-	all_test = make_loader(test_ds, all_test_idx, batch_size=len(test_ds), shuffle=False)
+	all_test = make_loader(test_ds, all_test_idx, batch_size=len(test_ds) if dataset == "mnist" else 1024, shuffle=False)
 	return train_ds, train_loader, all_test
-
 
 def materialize_epoch_batches(
 	train_ds: Subset,

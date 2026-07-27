@@ -10,12 +10,14 @@ import torch
 import experiments  # noqa: F401 - IMPORTANT! (side-effect: registers all experiment classes)
 from compute_results.constants import (
 	ALL_AVAILABLE_SELECTION,
+	DEFAULT_DATASET,
 	FINGERPRINT_EXCLUDE_KEYS,
 	INITIAL_MODEL_CHECKPOINT_FILENAMES,
 	INITIAL_MODEL_OPTIMIZER_SHORTHAND_TO_CLASS,
 	INITIAL_MODEL_OPTIMIZER_STATE_FILENAME,
 	PRETRAIN_REUSE_KEYS,
 )
+from experiments.dataset_registry import list_datasets
 from experiments.base import get_registered_experiment_class
 from experiments.mnist.common.label_perm import parse_restrain_digits
 from compute_results.defaults import SHAMPOO_PRECONDITIONER_EPSILON_KEY
@@ -23,7 +25,9 @@ from compute_results.constants import (
 		DEFAULT_THRESHOLD_ACC,
 		DEFAULT_TRAIN_K_SAMPLES,
 		EXPERT_THRESHOLD_ACC,
+		EXPERT_THRESHOLD_ACC_CIFAR10,
 		EXPERT_TRAIN_K_SAMPLES,
+		EXPERT_TRAIN_K_SAMPLES_CIFAR10,
 		DEFAULT_MULTI_LRS,
 		DEFAULT_MULTI_SEEDS,
 		MULTI_LRS_USE_DEFAULT,
@@ -103,6 +107,7 @@ def _apply_previous_training_config_defaults(stored: dict[str, Any]) -> None:
 	stored.setdefault("use_initial_model", "")
 	stored.setdefault("initial_model_mode", "init")
 	stored.setdefault("initial_model_sha256", "")
+	stored.setdefault("dataset", DEFAULT_DATASET)
 
 
 _DEPRECATED_ALL_KEYS: frozenset[str] = frozenset({
@@ -290,9 +295,10 @@ def validate_experiment_config_constraints(
 			f"experiment_config for {experiment_class}: 'pretrain_on_k_samples' must be >= 1, got {pk}"
 		)
 	n_div_pretrain = 10
+	n_div_trials = 10
 	if cls.__name__ == "PretrainThenShuffleMislabel":
 		rd = parse_restrain_digits(experiment_config.get("restrain_digits"))
-		n_div_pretrain = len(rd) if rd is not None else 10
+		n_div_trials = len(rd) if rd is not None else 10
 	elif cls.__name__ in ("Cat1SampleShuffleConstrained", "Cat1SampleShuffleInterleaved"):
 		rd = parse_restrain_digits(experiment_config.get("restrain_digits"))
 		if rd is None:
@@ -300,7 +306,7 @@ def validate_experiment_config_constraints(
 				f"experiment_config for {experiment_class}: "
 				f"'restrain_digits' is required for {cls.__name__}."
 			)
-		n_div_pretrain = len(rd)
+		n_div_trials = len(rd)
 	if pk % n_div_pretrain != 0:
 		raise ValueError(
 			f"experiment_config for {experiment_class}: 'pretrain_on_k_samples' must be divisible "
@@ -324,14 +330,14 @@ def validate_experiment_config_constraints(
 		)
 
 	if cls.__name__ in ("Cat1SampleShuffleFinetune", "Cat1SampleShuffleConstrained"):
-		if int(nt) % n_div_pretrain != 0:
+		if int(nt) % n_div_trials != 0:
 			raise ValueError(
 				f"experiment_config for {experiment_class}: 'num_trial_samples' must be divisible "
-				f"by {n_div_pretrain}; got {nt}."
+				f"by {n_div_trials}; got {nt}."
 			)
 
 	if cls.__name__ == "Cat1SampleShuffleInterleaved":
-		cycle_len = 2 * n_div_pretrain
+		cycle_len = 2 * n_div_trials
 		if int(nt) % 2 != 0:
 			raise ValueError(
 				f"experiment_config for {experiment_class}: 'num_trial_samples' must be even; "
@@ -349,20 +355,20 @@ def validate_experiment_config_constraints(
 		"Cat1SampleShuffleConstrained",
 	) and experiment_runs is not None:
 		prod = int(nt) * int(experiment_runs)
-		if prod % n_div_pretrain != 0:
+		if prod % n_div_trials != 0:
 			raise ValueError(
 				f"experiment_config for {experiment_class}: "
-				f"num_trial_samples * experiment_runs must be divisible by {n_div_pretrain} "
+				f"num_trial_samples * experiment_runs must be divisible by {n_div_trials} "
 				f"(balanced post-pretrain pool); got {nt} * {experiment_runs} = {prod}."
 			)
 
 	if cls.__name__ == "Cat1SampleShuffleInterleaved" and experiment_runs is not None:
 		prod = (int(nt) // 2) * int(experiment_runs)
-		if prod % n_div_pretrain != 0:
+		if prod % n_div_trials != 0:
 			raise ValueError(
 				f"experiment_config for {experiment_class}: "
 				f"(num_trial_samples // 2) * experiment_runs must be divisible by "
-				f"{n_div_pretrain} (balanced restrained post-pretrain pool); "
+				f"{n_div_trials} (balanced restrained post-pretrain pool); "
 				f"got ({nt} // 2) * {experiment_runs} = {prod}."
 			)
 
@@ -752,7 +758,12 @@ def load_initial_optimizer_state_dict(
 
 def fingerprint_payload(config: dict[str, Any]) -> dict[str, Any]:
 	"""Training-relevant subset of *config* used for hashing and equality checks."""
-	return {k: v for k, v in config.items() if k not in FINGERPRINT_EXCLUDE_KEYS}
+	payload = {k: v for k, v in config.items() if k not in FINGERPRINT_EXCLUDE_KEYS}
+	# Drop the default dataset so historical (pre-`dataset`) MNIST configs keep the
+	# same fingerprint / result directory; non-default datasets stay in the payload.
+	if payload.get("dataset") == DEFAULT_DATASET:
+		payload.pop("dataset", None)
+	return payload
 
 
 def compute_fingerprint(config: dict[str, Any]) -> str:
@@ -796,6 +807,7 @@ def build_training_config(
 	experiment_config: dict[str, Any],
 	model_class: str,
 	model_config: dict[str, Any],
+	dataset: str = DEFAULT_DATASET,
 	trial_epochs: int = 1,
 	base_lr: float = 1e-3,
 	batch_size: int = 1,
@@ -834,6 +846,7 @@ def build_training_config(
 		"experiment_config": experiment_config,
 		"model_class": model_class,
 		"model_config": model_config,
+		"dataset": dataset,
 		"trial_epochs": trial_epochs,
 		"base_lr": base_lr,
 		"batch_size": batch_size,
@@ -1125,17 +1138,34 @@ def parse_pretrain_inputs(
 		train_k_samples = DEFAULT_TRAIN_K_SAMPLES
 	else:
 		train_k_samples = int(train_k_samples)
-	if expert:
-		# always use EXPERT_TRAIN_K_SAMPLES when expert
-		train_k_samples = EXPERT_TRAIN_K_SAMPLES
+	dataset = str(raw.get("dataset", DEFAULT_DATASET))
+	if getattr(cli, "dataset", None) is not None:
+		dataset = str(cli.dataset)
 
-	threshold_acc = raw.get("threshold_acc")
-	if getattr(cli, "threshold_acc", None) is not None:
-		threshold_acc = float(cli.threshold_acc)
-	elif threshold_acc is None:
-		threshold_acc = EXPERT_THRESHOLD_ACC if expert else DEFAULT_THRESHOLD_ACC
+	if expert:
+		train_k_samples = (
+			EXPERT_TRAIN_K_SAMPLES_CIFAR10
+			if dataset == "cifar10"
+			else EXPERT_TRAIN_K_SAMPLES
+		)
+
+	if expert:
+		if getattr(cli, "threshold_acc", None) is not None:
+			threshold_acc = float(cli.threshold_acc)
+		else:
+			threshold_acc = (
+				EXPERT_THRESHOLD_ACC_CIFAR10
+				if dataset == "cifar10"
+				else EXPERT_THRESHOLD_ACC
+			)
 	else:
-		threshold_acc = float(threshold_acc)
+		threshold_acc = raw.get("threshold_acc")
+		if getattr(cli, "threshold_acc", None) is not None:
+			threshold_acc = float(cli.threshold_acc)
+		elif threshold_acc is None:
+			threshold_acc = DEFAULT_THRESHOLD_ACC
+		else:
+			threshold_acc = float(threshold_acc)
 
 	max_epochs = int(raw.get("max_epochs", 200))
 	if getattr(cli, "max_epochs", None) is not None:
@@ -1144,6 +1174,11 @@ def parse_pretrain_inputs(
 	data_root = str(raw.get("data_root", "./data"))
 	if getattr(cli, "data_root", None) is not None:
 		data_root = str(cli.data_root)
+
+	if dataset not in list_datasets():
+		raise ValueError(
+			f"Unknown dataset {dataset!r}. Available: {list_datasets()}"
+		)
 
 	save = bool(raw.get("save", True))
 	if getattr(cli, "no_save", False):
@@ -1193,6 +1228,7 @@ def parse_pretrain_inputs(
 		"threshold_acc": float(threshold_acc),
 		"max_epochs": max_epochs,
 		"data_root": data_root,
+		"dataset": dataset,
 		"save": save,
 		"force": force,
 		"device": device,
@@ -1203,7 +1239,12 @@ def parse_pretrain_inputs(
 
 
 def pretrain_fingerprint_payload(config: dict[str, Any]) -> dict[str, Any]:
-	return {k: v for k, v in config.items() if k not in PRETRAIN_FINGERPRINT_EXCLUDE_KEYS}
+	payload = {
+		k: v for k, v in config.items() if k not in PRETRAIN_FINGERPRINT_EXCLUDE_KEYS
+	}
+	if payload.get("dataset") == DEFAULT_DATASET:
+		payload.pop("dataset", None)
+	return payload
 
 
 def compute_pretrain_fingerprint(config: dict[str, Any]) -> str:
@@ -1229,6 +1270,7 @@ def build_pretrain_config(
 	max_epochs: int,
 	data_root: str,
 	expert: bool,
+	dataset: str = DEFAULT_DATASET,
 	opt_extra_kwargs: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
 	config: dict[str, Any] = {
@@ -1246,6 +1288,7 @@ def build_pretrain_config(
 		"threshold_acc": threshold_acc,
 		"max_epochs": max_epochs,
 		"data_root": data_root,
+		"dataset": dataset,
 		"expert": expert,
 		"opt_extra_kwargs": dict(opt_extra_kwargs or {}),
 	}
@@ -1296,6 +1339,8 @@ def _normalize_pretrain_reuse_value(key: str, value: Any) -> Any:
 		return float(value)
 	if key == "train_k_samples":
 		return int(value)
+	if key == "dataset":
+		return DEFAULT_DATASET if value is None else str(value)
 	return value
 
 
