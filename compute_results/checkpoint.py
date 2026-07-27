@@ -106,7 +106,7 @@ def extract_unit_activations(
 	*,
 	keep_on_gpu: bool = False,
 ) -> dict[str, np.ndarray | torch.Tensor]:
-	"""For each clickable unit, extract all activation values (no reduction)."""
+	"""For each tracked unit, extract all activation values (no reduction)."""
 	result: dict[str, np.ndarray | torch.Tensor] = {}
 	for u in units:
 		layer_act = activations.get(u["layer_name"])
@@ -138,7 +138,7 @@ def extract_unit_weights(
 	weights: dict[str, np.ndarray | torch.Tensor] = {}
 
 	params = dict(model.named_parameters())
-	units = model.clickable_units()
+	units = model.tracked_units()
 
 	for u in units:
 		layer_name = u["layer_name"]

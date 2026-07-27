@@ -139,7 +139,7 @@ def _run_checkpoint(
 
 	eval_inputs, _ = experiment.evaluation_inputs(device)
 	activations = persistent_capture.capture(eval_inputs, device)
-	act_values = extract_unit_activations(activations, model.clickable_units(), keep_on_gpu=keep_tensors)
+	act_values = extract_unit_activations(activations, model.tracked_units(), keep_on_gpu=keep_tensors)
 	weight_values = extract_unit_weights(model, keep_on_gpu=keep_tensors)
 	neuron_collector.record(tag, act_values, weight_values)
 
@@ -187,10 +187,12 @@ def train_with_config(
 	model = model.to(device)
 	model.train()
 
-	units = model.clickable_units()
+	units = model.tracked_units()
 	node_ids = [u["node_id"] for u in units]
 	extractor.set_units(units)
 
+	# model's conv. are frozen at call-site (run_simulation.py)
+	# keep all params in the optimizer so a full pretrained state dict can be loaded. 
 	optimizer = extractor.create_optimizer(model.parameters())
 	criterion = _criterion_from_config(config, model)
 
