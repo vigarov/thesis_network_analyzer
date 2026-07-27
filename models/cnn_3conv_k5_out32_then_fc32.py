@@ -28,7 +28,7 @@ class CNN3ConvK5Out32FC32(AnalyzableModel):
 		self._activation_name = activation
 		self._num_classes = num_classes
 
-		# 3 Sequentials instead of only one to select more easily clickable/hookable units
+		# 3 Sequentials instead of only one to select more easily tracked/hookable units
 		self.conv1 = nn.Sequential(nn.Conv2d(1, CONV_HIDDEN, kernel_size=K_SIZE, padding=2), get_activation(activation))
 		self.conv2 = nn.Sequential(nn.Conv2d(CONV_HIDDEN, CONV_HIDDEN, kernel_size=K_SIZE, padding=2), get_activation(activation))
 		self.conv3 = nn.Sequential(nn.Conv2d(CONV_HIDDEN, CONV_HIDDEN, kernel_size=K_SIZE, padding=2), get_activation(activation))
@@ -59,7 +59,7 @@ class CNN3ConvK5Out32FC32(AnalyzableModel):
 			"num_classes": self._num_classes,
 		}
 
-	def clickable_units(self) -> list[dict[str, Any]]:
+	def tracked_units(self) -> list[dict[str, Any]]:
 		units: list[dict[str, Any]] = []
 		for conv_name in ("conv1", "conv2", "conv3"):
 			for ch in range(CONV_HIDDEN):
@@ -95,3 +95,7 @@ class CNN3ConvK5Out32FC32(AnalyzableModel):
 			"fc": self.fc[0],
 			"head": self.head,
 		}
+
+	@property
+	def input_spec(self) -> tuple[int | None, str | None]:
+		return (None, None)

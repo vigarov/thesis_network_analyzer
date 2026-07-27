@@ -12,3 +12,5 @@ from models.base import (
 
 import models.dnn_5_hidden_64  # noqa: F401
 import models.cnn_3conv_k5_out32_then_fc32  # noqa: F401
+import models.inception_cifar  # noqa: F401
+import models.resnet_cifar  # noqa: F401

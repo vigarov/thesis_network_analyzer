@@ -3,8 +3,13 @@ from typing import Any
 
 import torch.nn as nn
 
-from models.base import AnalyzableModel, get_activation, register_model
-from models.unit_node_id import format_unit_node_id
+from models.base import AnalyzableModel, register_model
+from models.dnn_head import (
+	HEAD_SCOPE,
+	build_dnn_head,
+	dnn_head_tracked_units,
+	dnn_head_hookable_layers,
+)
 
 HIDDEN_SIZE = 64
 N_HIDDEN = 5
@@ -19,14 +24,13 @@ class DNN5Hidden64(AnalyzableModel):
 		self._activation_name = activation
 		self._num_classes = num_classes
 
-		layers: list[nn.Module] = []
-		in_features = FLATTEN_IMAGE_SIZE
-		for i in range(N_HIDDEN):
-			layers.append(nn.Linear(in_features, HIDDEN_SIZE))
-			layers.append(get_activation(activation))
-			in_features = HIDDEN_SIZE
-		self.hidden = nn.Sequential(*layers)
-		self.head = nn.Linear(HIDDEN_SIZE, num_classes)
+		self.hidden, self.head = build_dnn_head(
+			FLATTEN_IMAGE_SIZE,
+			hidden_size=HIDDEN_SIZE,
+			n_hidden=N_HIDDEN,
+			num_classes=num_classes,
+			activation=activation,
+		)
 
 	def forward(self, x):
 		x = x.view(x.size(0), -1)
@@ -45,32 +49,17 @@ class DNN5Hidden64(AnalyzableModel):
 			"num_classes": self._num_classes,
 		}
 
-	def clickable_units(self) -> list[dict[str, Any]]:
-		units: list[dict[str, Any]] = []
-		for layer_idx in range(N_HIDDEN):
-			layer_name = f"hidden.{layer_idx * 2}"
-			for neuron_idx in range(HIDDEN_SIZE):
-				units.append({
-					"node_id": format_unit_node_id(
-						"dnn", layer_name, "neuron", neuron_idx
-					),
-					"layer_name": layer_name,
-					"unit_index": neuron_idx,
-					"unit_type": "neuron",
-				})
-		for k in range(self._num_classes):
-			units.append({
-				"node_id": format_unit_node_id("dnn", "head", "neuron", k),
-				"layer_name": "head",
-				"unit_index": k,
-				"unit_type": "neuron",
-			})
-		return units
+	def tracked_units(self) -> list[dict[str, Any]]:
+		return dnn_head_tracked_units(
+			HEAD_SCOPE,
+			n_hidden=N_HIDDEN,
+			hidden_size=HIDDEN_SIZE,
+			num_classes=self._num_classes,
+		)
 
 	def hookable_layers(self) -> dict[str, nn.Module]:
-		layers: dict[str, nn.Module] = {}
-		for layer_idx in range(N_HIDDEN):
-			name = f"hidden.{layer_idx * 2}"
-			layers[name] = self.hidden[layer_idx * 2]
-		layers["head"] = self.head
-		return layers
+		return dnn_head_hookable_layers(self.hidden, self.head, n_hidden=N_HIDDEN)
+
+	@property
+	def input_spec(self) -> tuple[int | None, str | None]:
+		return (None, None)

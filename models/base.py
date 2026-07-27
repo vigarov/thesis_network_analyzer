@@ -90,14 +90,26 @@ def apply_model_weight_init(
 	nonlin, neg_slope = _kaiming_nonlinearity(activation)
 	std_rand = math.sqrt(init_epsilon)
 
+	scale_getter = getattr(model, "he_init_module_scale", None)
 	for i, m in enumerate(weight_modules):
 		if i < k_eff:
-			nn.init.kaiming_normal_(
-				m.weight,
-				a=neg_slope,
-				mode="fan_in",
-				nonlinearity=cast(Any, nonlin),
+			scale = (
+				float(scale_getter(m))  # type: ignore[arg-type]
+				if callable(scale_getter)
+				else 1.0
 			)
+			if isinstance(m, nn.Conv2d) and scale != 1.0:
+				n = m.kernel_size[0] * m.kernel_size[1] * m.out_channels
+				nn.init.normal_(m.weight, mean=0.0, std=scale * math.sqrt(2.0 / n))
+			else:
+				nn.init.kaiming_normal_(
+					m.weight,
+					a=neg_slope,
+					mode="fan_in",
+					nonlinearity=cast(Any, nonlin),
+				)
+				if scale != 1.0:
+					m.weight.mul_(scale)
 			if m.bias is not None:
 				nn.init.zeros_(m.bias)
 		else:
@@ -109,8 +121,9 @@ def apply_model_weight_init(
 class AnalyzableModel(nn.Module, abc.ABC):
 	"""Base class for models used in the analysis framework.
 
-	Subclasses declare which layers contain the "clickable units" that appear
-	in the visualization, and provide metadata about each unit.
+	Subclasses declare which layers contain the "tracked units" whose
+	activations, weights, and optimizer signals are captured during training,
+	and provide metadata about each unit.
 	"""
 
 	@abc.abstractmethod
@@ -122,8 +135,8 @@ class AnalyzableModel(nn.Module, abc.ABC):
 		"""Model-specific config fields frozen across reruns."""
 
 	@abc.abstractmethod
-	def clickable_units(self) -> list[dict[str, Any]]:
-		"""Return a list of unit descriptors for the visualization.
+	def tracked_units(self) -> list[dict[str, Any]]:
+		"""Return a list of unit (neurons) to be captured/tracked.
 
 		Each descriptor is a dict with at least:
 			- node_id: str  (canonical: `scope|layer_name|unit_type|unit_index` via
@@ -138,6 +151,25 @@ class AnalyzableModel(nn.Module, abc.ABC):
 	def hookable_layers(self) -> dict[str, nn.Module]:
 		"""Return {layer_name: module} for layers where forward hooks
 		should capture activations."""
+
+	@property
+	@abc.abstractmethod
+	def input_spec(self) -> tuple[int | None, str | None]:
+		"""Returns model-specific `(input_size, normalization)` for the dataset normalization.
+
+		`None` for either field means the dataset default applies (e.g. MNIST
+		train-statistics normalization without resizing).
+		"""
+
+	def freeze_backbone(self) -> None:
+		"""For more complex models (e.g.: Inception/ResNet), freeze the convolutional extractors.
+		noop otherwise
+		"""
+		return None
+
+	def he_init_module_scale(self, module: nn.Module) -> float:
+		"""Per-module scale applied during He init (1.0 = standard Kaiming)."""
+		return 1.0
 
 
 ACTIVATION_MAP: dict[str, type[nn.Module]] = {
