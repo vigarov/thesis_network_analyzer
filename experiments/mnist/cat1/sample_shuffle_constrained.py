@@ -13,7 +13,11 @@ from torch.utils.data import DataLoader, Subset
 
 from experiments.base import TrialSpec, register_experiment
 from experiments.mnist.base import MNISTWrapper, digit_indices, make_loader
-from experiments.mnist.pretrain_split import split_uniform_k_pretrain_remaining
+from experiments.mnist.pretrain_split import (
+	global_pretrain_sample_count,
+	pretrain_digits_for_scope,
+	split_global_k_pretrain_remaining,
+)
 from experiments.mnist.relabel_ds import PermutedLabelMapDataset
 from experiments.mnist.common.label_perm import (
 	parse_restrain_digits,
@@ -57,9 +61,9 @@ class Cat1SampleShuffleConstrained(MNISTWrapper):
 			)
 		if pretrain_on_k_samples < 1:
 			raise ValueError(f"pretrain_on_k_samples must be >= 1, got {pretrain_on_k_samples}")
-		if pretrain_on_k_samples % self._n_active != 0:
+		if pretrain_on_k_samples % self.N_DIGITS != 0:
 			raise ValueError(
-				f"pretrain_on_k_samples must be divisible by len(restrain_digits)={self._n_active}, "
+				f"pretrain_on_k_samples must be divisible by N_DIGITS={self.N_DIGITS}, "
 				f"got {pretrain_on_k_samples}."
 			)
 		if not isinstance(num_trial_samples, int):
@@ -77,9 +81,12 @@ class Cat1SampleShuffleConstrained(MNISTWrapper):
 		super().__init__(**kwargs)
 		self.pretrain_on_k_samples = pretrain_on_k_samples
 		self.num_trial_samples = num_trial_samples
+		self._pretrain_digits = pretrain_digits_for_scope(self._active_digit_tuple)
 
 	def pretrain_sample_count(self) -> int:
-		return self.pretrain_on_k_samples
+		return global_pretrain_sample_count(
+			self.pretrain_on_k_samples, self.N_DIGITS, self._pretrain_digits
+		)
 
 	@property
 	def first_digits(self) -> tuple[int, ...]:
@@ -127,11 +134,12 @@ class Cat1SampleShuffleConstrained(MNISTWrapper):
 				f"{self._experiment_variability!r}. Supported: ''."
 			)
 		per_digit = self.num_trial_samples // self._n_active
-		indices_by_digit = digit_indices(self._train_ds, self._active_digit_tuple)
-		pretrain_flat, remaining_by_digit = split_uniform_k_pretrain_remaining(
+		indices_by_digit = digit_indices(self._train_ds, tuple(range(self.N_DIGITS)))
+		pretrain_flat, remaining_by_digit = split_global_k_pretrain_remaining(
 			self.pretrain_on_k_samples,
 			indices_by_digit,
-			digits=self._active_digit_tuple,
+			self.N_DIGITS,
+			pretrain_digits=self._pretrain_digits,
 		)
 		for d in self._active_digit_tuple:
 			rem = remaining_by_digit[d]

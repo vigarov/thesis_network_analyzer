@@ -1,23 +1,24 @@
-"""Base class for MNIST experiments with shared dataset handling.
+"""Base class for image-classification experiments.
 
 Provides:
-- Train-set-based normalization (mean/std computed from MNIST train split).
-- Digit-index extraction utilities.
+- Dataset-agnostic loading via `experiments.dataset_registry` (MNIST or CIFAR10)
+- Class-index extraction utilities.
 - A common `evaluation_inputs` implementation.
 
-Subclasses only need to implement `experiment_id`, `config_fields`,
-and `_build_trials`.
+Subclasses need to implement `experiment_id`, `config_fields`, and `_build_trials`. 
 """
 from collections.abc import Callable
 from typing import Any
 
 import torch
 from torch.utils.data import DataLoader, Dataset, Subset, TensorDataset
-from torchvision import datasets, transforms
 
 from experiments.base import Experiment
-
-DATA_ROOT = "./data"
+from experiments.dataset_registry import (
+	DATA_ROOT,
+	dataset_targets,
+	load_train_test_datasets,
+)
 
 
 def label_to_int(y: int | torch.Tensor) -> int:
@@ -25,20 +26,20 @@ def label_to_int(y: int | torch.Tensor) -> int:
 
 
 def digit_indices(
-	dataset: datasets.MNIST | Subset | TensorDataset,
+	dataset,
 	digits: tuple[int, ...],
 ) -> dict[int, list[int]]:
-	"""Return `{digit: [indices]}` for the requested digits."""
+	"""Return `{class_label: [indices]}` for the requested labels."""
 	per_digit: dict[int, list[int]] = {d: [] for d in digits}
-	for idx in range(len(dataset)):
-		label = label_to_int(dataset[idx][1])  # type: ignore[union-attr]
+	labels = dataset_targets(dataset)
+	for idx, label in enumerate(labels):
 		if label in per_digit:
 			per_digit[label].append(idx)
 	return per_digit
 
 
 def make_loader(
-	dataset: datasets.MNIST | Subset | TensorDataset,
+	dataset,
 	indices: list[int],
 	batch_size: int,
 	shuffle: bool = True,
@@ -55,7 +56,7 @@ class _PinnedEvalSupervisionDataset(Dataset):
 
 	def __init__(
 		self,
-		full_train: datasets.MNIST,
+		full_train: Dataset,
 		indices: list[int],
 		label_from_true: Callable[[int], int],
 	) -> None:
@@ -72,26 +73,36 @@ class _PinnedEvalSupervisionDataset(Dataset):
 		yt = self._label_from_true(label_to_int(y))
 		return x, torch.tensor(yt, dtype=torch.long)
 
-
+# [TODO] : Rename to VisualExperiment
 class MNISTWrapper(Experiment):
-	"""Shared base for MNIST digit-continual experiments.
+	"""Shared base for experiments for both MNIST and CIFAR-10.
 
-	Handles dataset loading with normalization derived from the train split,
-	so both train and test sets live in the same feature space.
+	Handles dataset loading with the transform/normalization procedure
+	resolved from `(dataset, model, input_spec)` (see `experiments.dataset_registry`)
+	Model selects normalization procedure, or dataset by default if unspecified.
 	"""
 
-	# Number of digit classes in MNIST (0--9).
+	# Number of classes (0-9); identical for MNIST and CIFAR-10.
 	N_DIGITS: int = 10
 
 	def __init__(
 		self,
 		digitA: int = 0,
 		digitB: int = 1,
+		*,
+		dataset: str = "mnist",
+		input_size: int | None = None,
+		normalization: str | None = None,
+		data_root: str = DATA_ROOT,
 		**kwargs,
 	):
 		super().__init__()
 		self.digitA = digitA
 		self.digitB = digitB
+		self._dataset = str(dataset)
+		self._input_size = input_size
+		self._normalization = normalization
+		self._data_root = data_root
 		self._ensure_datasets()
 		self._test_by_digit_indices = digit_indices(self._test_ds, tuple(range(self.N_DIGITS)))
 		self._eval_pinned_device: torch.device | None = None
@@ -108,29 +119,15 @@ class MNISTWrapper(Experiment):
 		return {"digitA": self.digitA, "digitB": self.digitB}
 
 	def _ensure_datasets(self):
-		"""Load MNIST train/test sets, normalizing both with train-set stats."""
-		data_root = DATA_ROOT
-		raw_train = datasets.MNIST(
-			root=data_root, train=True, download=True,
-			transform=transforms.ToTensor(),
-		)
-		pixels = raw_train.data.float() / 255.0
-		mean = pixels.mean().item()
-		std = pixels.std().item()
-
-		tfm = transforms.Compose([
-			transforms.ToTensor(),
-			transforms.Normalize((mean,), (std,)),
-		])
-
-		full_train = datasets.MNIST(
-			root=data_root, train=True, download=True, transform=tfm,
-		)
-		self._test_ds = datasets.MNIST(
-			root=data_root, train=False, download=True, transform=tfm,
+		"""Load train/test sets with the model/dataset transform/normalization."""
+		full_train, self._test_ds = load_train_test_datasets(
+			self._dataset,
+			self._data_root,
+			input_size=self._input_size,
+			normalization=self._normalization,
 		)
 
-		# Eval inputs for activations: last 5 per digit (0 .. N_DIGITS-1) from train.
+		# Eval inputs for activations: last 5 per class (0 .. N_DIGITS-1) from train.
 		all_digits = tuple(range(self.N_DIGITS))
 		train_by_digit_indices = digit_indices(full_train, all_digits)
 		eval_indices_list: list[int] = []
@@ -152,7 +149,11 @@ class MNISTWrapper(Experiment):
 	def to_device(self, device: torch.device) -> None:
 		super().to_device(device) # allows the to_device() call
 		if "cpu" == device.type:
-			assert "cpu" in self._test_ds.data.device.type, "Test dataset must be on CPU" # type: ignore[attr-defined]
+			# Only tensor-backed datasets (e.g. MNIST) expose `.data.device`;
+			# CIFAR-10 stores `.data` as a NumPy array, so skip the check there.
+			data = getattr(self._test_ds, "data", None)
+			if isinstance(data, torch.Tensor):
+				assert "cpu" in data.device.type, "Test dataset must be on CPU"
 			return
 		
 		# In both cases, we must instantiate a temp DataLoader to actually extract the tensors (in a new dataset)
