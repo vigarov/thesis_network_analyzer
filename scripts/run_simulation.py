@@ -103,7 +103,13 @@ from compute_results.config_guard import (
 from compute_results.defaults import OPTIMIZER_LR_KEY, SHAMPOO_PRECONDITIONER_EPSILON_KEY
 from compute_results.training_loop import train_with_config
 from experiments import get_experiment, list_experiments
-from models import apply_model_weight_init, get_model, list_models, parse_he_init
+from experiments.dataset_registry import list_datasets
+from models import (
+	apply_model_weight_init,
+	get_model,
+	list_models,
+	parse_he_init,
+)
 from optimizers import get_extractor, list_extractors
 from scripts.utils.cluster_utils import (
 	add_io_arguments,
@@ -146,11 +152,15 @@ def _resolve_sweep_lrs(cli_multi_lr: str | None, default_lr: float) -> list[floa
 	return [float(p) for p in _parse_csv(cli_multi_lr)]
 
 
-def _resolve_optimizer(name: str, base_lr: float, **kwargs) -> tuple[str, dict]:
+def _resolve_optimizer(
+	name: str, base_lr: float, *, dataset: str = "mnist", **kwargs
+) -> tuple[str, dict]:
 	"""Resolve shorthand / class name to (registry class name, `get_extractor` kwargs).
 
 	*base_lr* always becomes `OPTIMIZER_LR_KEY` (overrides the same key in
-	`**kwargs` if present). Remaining `**kwargs` are forwarded
+	`**kwargs` if present). For Adam, the lr is scaled from a dataset-specific
+	base (MNIST: 0.0005, otherwise: 0.0001) times `base_lr / DEFAULT_LR`.
+	Remaining `**kwargs` are forwarded
 	"""
 	name = name.strip()
 	if name in OPTIMIZER_SHORTHAND:
@@ -159,7 +169,14 @@ def _resolve_optimizer(name: str, base_lr: float, **kwargs) -> tuple[str, dict]:
 	else:
 		cls_name = name
 		out = dict(kwargs)
-	out[OPTIMIZER_LR_KEY] = base_lr if "adam" not in cls_name.lower() else 0.0005 * (base_lr / DEFAULT_LR)
+	if "adam" in cls_name.lower():
+		adam_base = 0.0005 if str(dataset).strip().lower() == "mnist" else 0.0001
+		out[OPTIMIZER_LR_KEY] = adam_base * (base_lr / DEFAULT_LR)
+	elif "pure" in cls_name.lower():
+		pure_shampoo_base = 0.01 if str(dataset).strip().lower() == "mnist" else 0.001
+		out[OPTIMIZER_LR_KEY] = pure_shampoo_base * (base_lr / DEFAULT_LR)
+	else:
+		out[OPTIMIZER_LR_KEY] = base_lr
 	return cls_name, out
 
 
@@ -201,6 +218,7 @@ class _Task:
 	config: dict
 	seed: int
 	results_dir: Path
+	dataset: str = "mnist"
 	env_file: Path | None = None
 
 	@property
@@ -222,8 +240,15 @@ def _run_single_task(
 		sys.path.insert(0, str(project_root))
 
 	t = task
-	experiment = get_experiment(t.experiment_class, **t.experiment_kwargs)
 	model = get_model(t.model_class, **t.model_kwargs)
+	input_size, normalization = model.input_spec
+	experiment = get_experiment(
+		t.experiment_class,
+		dataset=t.dataset,
+		input_size=input_size,
+		normalization=normalization,
+		**t.experiment_kwargs,
+	)
 	extractor = get_extractor(t.optimizer_class, **t.optimizer_kwargs)
 
 	torch.manual_seed(t.seed)
@@ -243,6 +268,9 @@ def _run_single_task(
 			init_epsilon=float(t.config["init_epsilon"]),
 			activation=t.config.get("activation", "relu"),
 		)
+
+	# Freeze model conv blocks, if any
+	model.freeze_backbone()
 
 	num_gpus = torch.cuda.device_count()
 	if num_gpus > 0:
@@ -315,6 +343,12 @@ def _parse_args() -> argparse.Namespace:
 			"Optimizer shorthand(s) or extractor class name(s), comma-separated. "
 			"Use 'all' to include every registered extractor (optionally mix with names)."
 		),
+	)
+	p.add_argument(
+		"--dataset",
+		default=None,
+		choices=list_datasets(),
+		help="Dataset to run on (default: mnist, or JSON 'dataset').",
 	)
 	p.add_argument("--digitA", type=int, default=1)
 	p.add_argument("--digitB", type=int, default=2)
@@ -580,6 +614,7 @@ def main() -> int:
 			)
 		)
 		loss = str(raw.get("loss", args.loss))
+		dataset = str(raw.get("dataset", "mnist"))
 		force = raw.get("force", False) or args.force
 		use_initial_model = str(raw.get("use_initial_model", "") or "")
 		initial_model_mode = str(raw.get("initial_model_mode", "init") or "init")
@@ -621,11 +656,21 @@ def main() -> int:
 		experiment_runs = args.experiment_runs
 		experiment_variability = args.experiment_variability
 		loss = args.loss
+		dataset = "mnist"
 		force = args.force
 		use_initial_model = ""
 		initial_model_mode = "init"
 		save_model = ""
 		raw = {}  # no JSON; CLI-only path
+
+	if args.dataset is not None:
+		dataset = args.dataset
+	if dataset not in list_datasets():
+		print(
+			f"ERROR: Unknown dataset {dataset!r}. Available: {list_datasets()}",
+			file=sys.stderr,
+		)
+		sys.exit(1)
 
 	if args.use_initial_model is not None:
 		use_initial_model = args.use_initial_model
@@ -701,7 +746,9 @@ def main() -> int:
 			opt_registry_classes_for_initial = []
 			opt_ids_for_initial = []
 			for n in optimizer_names:
-				oc, ok = _resolve_optimizer(n, run_base_lr, **opt_extra_kwargs)
+				oc, ok = _resolve_optimizer(
+					n, run_base_lr, dataset=dataset, **opt_extra_kwargs
+				)
 				opt_registry_classes_for_initial.append(oc)
 				opt_ids_for_initial.append(get_extractor(oc, **ok).optimizer_id())
 
@@ -713,22 +760,30 @@ def main() -> int:
 			if "activation" not in mod_kw:
 				mod_kw["activation"] = activation
 
-			experiment = get_experiment(exp_cls, **exp_kw)
+			model = get_model(mod_cls, **mod_kw)
+			input_size, normalization = model.input_spec
+			experiment = get_experiment(
+				exp_cls,
+				dataset=dataset,
+				input_size=input_size,
+				normalization=normalization,
+				**exp_kw,
+			)
 			if exp_cls not in pretrain_plan_logged and type(experiment).has_pretrain:
 				print(
 					f"{exp_cls}: pretraining will use {experiment.pretrain_sample_count()} samples "
 					f"(train pool size {experiment.train_pool_size()})."
 				)
 				pretrain_plan_logged.add(exp_cls)
-			model = get_model(mod_cls, **mod_kw)
 			opt_class, opt_kwargs = _resolve_optimizer(
-				opt_name, run_base_lr, **opt_extra_kwargs
+				opt_name, run_base_lr, dataset=dataset, **opt_extra_kwargs
 			)
 			config = build_training_config(
 				experiment_class=exp_cls,
 				experiment_config=exp_kw,
 				model_class=mod_cls,
 				model_config=mod_kw,
+				dataset=dataset,
 				trial_epochs=trial_epochs,
 				base_lr=run_base_lr,
 				batch_size=batch_size,
@@ -768,6 +823,7 @@ def main() -> int:
 					config=config,
 					seed=run_seed,
 					results_dir=results_dir,
+					dataset=dataset,
 					env_file=args.env_file,
 				)
 			)

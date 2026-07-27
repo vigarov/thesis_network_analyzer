@@ -3,9 +3,9 @@
 #
 # Usage:
 #   bash scripts/on_device/pretrain_for_all_configs.sh
-#   bash scripts/on_device/pretrain_for_all_configs.sh --expert
-#   bash scripts/on_device/pretrain_for_all_configs.sh --multi-seeds
-#   bash scripts/on_device/pretrain_for_all_configs.sh --multi-seeds 6,7,14
+#   bash scripts/on_device/pretrain_for_all_configs.sh input_configs/cifar10
+#   bash scripts/on_device/pretrain_for_all_configs.sh --expert input_configs
+#   bash scripts/on_device/pretrain_for_all_configs.sh --multi-seeds 6,7,14 input_configs/cifar10
 #   bash scripts/on_device/pretrain_for_all_configs.sh --multi-lr 1e-3,1e-2,1e-1
 #   bash scripts/on_device/pretrain_for_all_configs.sh --expert --multi-seeds --multi-lr
 set -euo pipefail
@@ -17,20 +17,35 @@ cd "${_REPO_ROOT}"
 EXPERT=false
 MULTI_SEEDS_ARGS=()
 MULTI_LR_ARGS=()
+CONFIG_DIR="input_configs"
 
 usage() {
 	cat <<'EOF'
-Usage: pretrain_for_all_configs.sh [--expert] [--multi-seeds [SEEDS]] [--multi-lr [LRS]]
+Usage: pretrain_for_all_configs.sh [OPTIONS] [CONFIG_DIR]
 
-Run pretrain-models for each input_configs/*.json (skips test.json).
+Run pretrain-models for each *.json in CONFIG_DIR (non-recursive; skips test.json).
+Checkpoints are written under pretrained_models/<dataset>/<base|expert>/!OPT/!SD/.
+
+Arguments:
+  CONFIG_DIR            Parent directory to traverse (default: input_configs)
 
 Options (forwarded to pretrain-models):
-  --expert              Expert preset: 20000 samples, threshold 0.95
+  --expert              Expert preset: 20000 samples (MNIST) / 40000 (CIFAR-10)
   --multi-seeds         Model weight-init seeds; bare flag uses notebook defaults
   --multi-seeds SEEDS   Comma-separated seed list (e.g. 6,7,14)
   --multi-lr            Base learning rates; bare flag uses the default sweep
   --multi-lr LRS        Comma-separated lr list (e.g. 1e-3,1e-2,1e-1)
 EOF
+}
+
+_read_dataset() {
+	local line
+	line="$(grep '"dataset"' "$1" | head -n 1)"
+	if echo "${line}" | grep -q 'cifar'; then
+		echo cifar10
+	else
+		echo mnist
+	fi
 }
 
 while [[ $# -gt 0 ]]; do
@@ -61,13 +76,22 @@ while [[ $# -gt 0 ]]; do
 			usage
 			exit 0
 			;;
-		*)
+		--*)
 			echo "ERROR: unknown option: $1" >&2
 			usage >&2
 			exit 1
 			;;
+		*)
+			CONFIG_DIR="$1"
+			shift
+			;;
 	esac
 done
+
+if [[ ! -d "${CONFIG_DIR}" ]]; then
+	echo "ERROR: config directory not found: ${CONFIG_DIR}" >&2
+	exit 1
+fi
 
 PRETRAIN_ARGS=()
 OUTPUT_SUBDIR=""
@@ -84,11 +108,17 @@ if ((${#MULTI_LR_ARGS[@]} > 0)); then
 	PRETRAIN_ARGS+=("${MULTI_LR_ARGS[@]}")
 fi
 
-OUTPUT_DIR="pretrained_models/${OUTPUT_SUBDIR}/!OPT/!SD/"
+mapfile -t CONFIG_FILES < <(find "${CONFIG_DIR}" -maxdepth 1 -name '*.json' | sort)
+if ((${#CONFIG_FILES[@]} == 0)); then
+	echo "ERROR: no JSON configs under ${CONFIG_DIR}" >&2
+	exit 1
+fi
 
-for config in input_configs/*.json; do
+for config in "${CONFIG_FILES[@]}"; do
 	[[ "$(basename "${config}")" == "test.json" ]] && continue
-	echo "pretrain config=${config}"
+	dataset="$(_read_dataset "${config}")"
+	OUTPUT_DIR="pretrained_models/${dataset}/${OUTPUT_SUBDIR}/!OPT/!SD/"
+	echo "pretrain config=${config} dataset=${dataset} output=${OUTPUT_DIR}"
 	uv run pretrain-models \
 		--config "${config}" \
 		--output-dir "${OUTPUT_DIR}" \

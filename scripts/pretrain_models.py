@@ -64,13 +64,14 @@ from compute_results.constants import (
 )
 from compute_results.pretrain import (
 	PretrainRunConfig,
-	build_mnist_train_and_eval,
+	build_train_and_eval,
 	resolve_save_root,
 	save_pretrained_checkpoint,
 	train_optimizer_for_seed,
 )
 from experiments.base import get_registered_experiment_class
-from models import list_models, parse_he_init
+from experiments.dataset_registry import list_datasets
+from models import get_model, list_models, parse_he_init
 from optimizers import get_extractor, list_extractors
 from scripts.utils.cluster_utils import (
 	add_io_arguments,
@@ -106,7 +107,16 @@ def _parse_args() -> argparse.Namespace:
 	p.add_argument(
 		"--expert",
 		action="store_true",
-		help="Expert preset: 20000 samples, threshold 0.95, expert_ out-dir prefix.",
+		help=(
+			"Expert preset: 20000 samples (MNIST) or 40000 (CIFAR-10), "
+			"threshold 0.95 (MNIST) or 0.8 (CIFAR-10), expert_ out-dir prefix."
+		),
+	)
+	p.add_argument(
+		"--dataset",
+		default=None,
+		choices=list_datasets(),
+		help="Dataset to pretrain on (default: mnist, or JSON 'dataset').",
 	)
 	p.add_argument("--train-k-samples", type=int, default=None, metavar="K")
 	p.add_argument("--threshold-acc", type=float, default=None)
@@ -261,13 +271,21 @@ def main() -> int:
 	print(f"device={device}")
 
 	# The training data split is independent of the learning rate, so build it once.
-	train_ds, _, all_test = build_mnist_train_and_eval(
+	# The transform is resolved from the model's declared input spec (e.g. 28x28
+	# whitening for Inception, 32x32 channel-normalize for ResNet, MNIST default).
+	_probe = get_model(params["model_class"], **params["model_config"])
+	input_size, normalization = _probe.input_spec
+	train_ds, _, all_test = build_train_and_eval(
 		params["train_k_samples"],
 		params["batch_size"],
 		dataset_seed=params["dataset_seed"],
+		dataset=params["dataset"],
+		input_size=input_size,
+		normalization=normalization,
+		data_root=params["data_root"],
 	)
 	print(
-		f"dataset_seed={params['dataset_seed']}  "
+		f"dataset={params['dataset']}  dataset_seed={params['dataset_seed']}  "
 		f"Train size K={params['train_k_samples']} "
 		f"({params['train_k_samples'] // 10} per digit, uniform), "
 		f"batches/epoch: {len(train_ds) // params['batch_size']}, "
@@ -298,6 +316,7 @@ def main() -> int:
 			threshold_acc=params["threshold_acc"],
 			max_epochs=params["max_epochs"],
 			data_root=params["data_root"],
+			dataset=params["dataset"],
 			expert=params["expert"],
 			opt_extra_kwargs=params["opt_extra_kwargs"],
 		)
@@ -337,7 +356,10 @@ def main() -> int:
 			)
 			for opt_name in optimizer_names:
 				opt_class, opt_kwargs = _resolve_optimizer(
-					opt_name, base_lr, **params["opt_extra_kwargs"]
+					opt_name,
+					base_lr,
+					dataset=params["dataset"],
+					**params["opt_extra_kwargs"],
 				)
 				slug = get_extractor(opt_class, **opt_kwargs).optimizer_id()
 				save_root = resolve_save_root(params["out_dir"], slug=slug, seed=seed)
