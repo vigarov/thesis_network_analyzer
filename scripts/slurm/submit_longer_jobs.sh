@@ -3,12 +3,21 @@
 #
 # Usage (from repo root):
 #   bash scripts/slurm/submit_longer_jobs.sh
+#   bash scripts/slurm/submit_longer_jobs.sh --latest
+#   bash scripts/slurm/submit_longer_jobs.sh --latest --old
 #   bash scripts/slurm/submit_longer_jobs.sh --dry-run
 #   bash scripts/slurm/submit_longer_jobs.sh --no-minmax   # wait only, skip min-max
 #
 # Requires .env (PROJECT_ROOT, RESULTS_DIR, ANALYSIS_OUTPUT_DIR, SLURM_*).
 
 set -euo pipefail
+
+# Edit to re-submit only specific jobs with `--latest`.
+LATEST_JOB_SLUGS=(
+	cat2_sequence_control_tr__adam_lr0.0005__2e209b0041
+	cat2_sequence_recover_K1__adam_lr0.0005__9206ccb4f9
+	cat2_sequence_reinforce__grafted_shampoo_lr0.01__c8e80fcb2a
+)
 
 _SLURM_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/slurm/common.sh
@@ -17,6 +26,8 @@ source "${_SLURM_DIR}/common.sh"
 SCRIPTS_DIR="${_SLURM_DIR}/generated/analyse_jobs"
 DRY_RUN=0
 RUN_MINMAX=1
+LATEST_ONLY=0
+USE_OLD=0
 POLL_INTERVAL=5
 
 while (($# > 0)); do
@@ -29,8 +40,16 @@ while (($# > 0)); do
 		RUN_MINMAX=0
 		shift
 		;;
+	--latest)
+		LATEST_ONLY=1
+		shift
+		;;
+	--old)
+		USE_OLD=1
+		shift
+		;;
 	-h | --help)
-		sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//'
+		sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'
 		exit 0
 		;;
 	*)
@@ -39,6 +58,42 @@ while (($# > 0)); do
 		;;
 	esac
 done
+
+is_latest_job() {
+	local slug="$1"
+	local s
+	for s in "${LATEST_JOB_SLUGS[@]}"; do
+		if [[ "${slug}" == "${s}" ]]; then
+			return 0
+		fi
+	done
+	return 1
+}
+
+should_submit() {
+	if ((LATEST_ONLY)); then
+		is_latest_job "$1"
+	else
+		return 0
+	fi
+}
+
+resolve_time() {
+	local slug="$1"
+	local default_time="$2"
+
+	if ((USE_OLD)); then
+		echo "${default_time}"
+		return
+	fi
+
+	case "${slug}" in
+	*__2e209b0041) echo "05:30:00" ;;
+	*__9206ccb4f9) echo "20:00:00" ;;
+	*__c8e80fcb2a) echo "12:00:00" ;;
+	*) echo "${default_time}" ;;
+	esac
+}
 
 submit_shard() {
 	local time_limit="$1"
@@ -119,7 +174,9 @@ for slug in \
 	cat2_sequence_recover_K1__grafted_shampoo_lr0.01__e01a09e3da \
 	cat2_sequence_reinforce__adagrad_lr0.01__2b9d218acc
 do
-	submit_shard "04:30:00" "${slug}"
+	if should_submit "${slug}"; then
+		submit_shard "$(resolve_time "${slug}" "04:30:00")" "${slug}"
+	fi
 done
 
 # 6h45m
@@ -131,7 +188,9 @@ for slug in \
 	cat2_sequence_reinforce__pure_shampoo_lr0.01__8cddccb29a \
 	cat2_sequence_reinforce__sgd_lr0.01__16192fdf2a
 do
-	submit_shard "06:45:00" "${slug}"
+	if should_submit "${slug}"; then
+		submit_shard "$(resolve_time "${slug}" "06:45:00")" "${slug}"
+	fi
 done
 
 # 10h
@@ -140,11 +199,22 @@ for slug in \
 	cat2_sequence_recover_K1__sgd_lr0.01__b4aa72b754 \
 	cat2_sequence_reinforce__grafted_shampoo_lr0.01__c8e80fcb2a
 do
-	submit_shard "10:00:00" "${slug}"
+	if should_submit "${slug}"; then
+		submit_shard "$(resolve_time "${slug}" "10:00:00")" "${slug}"
+	fi
 done
 
 if ((DRY_RUN)); then
-	echo "Dry run complete (15 shard(s))."
+	if ((LATEST_ONLY)); then
+		echo "Dry run complete (${#LATEST_JOB_SLUGS[@]} latest shard(s))."
+	else
+		echo "Dry run complete (15 shard(s))."
+	fi
+	exit 0
+fi
+
+if ((${#SUBMITTED_JOB_IDS[@]} == 0)); then
+	echo "No jobs submitted."
 	exit 0
 fi
 
