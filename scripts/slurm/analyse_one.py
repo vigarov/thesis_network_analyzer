@@ -15,6 +15,8 @@ if str(_PROJECT_ROOT) not in sys.path:
 	sys.path.insert(0, str(_PROJECT_ROOT))
 
 from scripts.analyse_sim_results import (
+	DEFAULT_EXPERT_MODEL_DIR_CIFAR,
+	DEFAULT_EXPERT_MODEL_DIR_MNIST,
 	DEFAULT_SCORE_FACTORS,
 	_parse_score_factors,
 	run_analysis,
@@ -48,12 +50,18 @@ def build_parser() -> argparse.ArgumentParser:
 		help="Directory for gzip-pickled analysis checkpoints.",
 	)
 	p.add_argument(
+		"--dataset",
+		default="mnist",
+		help="Dataset family (default: mnist). Accepts cifar / cifar10.",
+	)
+	p.add_argument(
 		"--expert-model-dir",
 		type=str,
-		default="pretrained_models/expert/!OPT/",
+		default=None,
 		help=(
 			"Expert saliency checkpoints relative to project root "
-			"(!OPT → optimizer id; !SD → config.json seed, appended if omitted)."
+			"(!OPT → optimizer id; !ARCH → inception/resnet for CIFAR; "
+			"!SD → config.json seed, appended if omitted)."
 		),
 	)
 	p.add_argument(
@@ -119,13 +127,20 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
 	args = build_parser().parse_args(argv)
+	dataset = args.dataset[:5]
 	score_factors = args.score_factors if args.score_factors is not None else dict(DEFAULT_SCORE_FACTORS)
+	if args.expert_model_dir is None:
+		expert_model_dir = (
+			DEFAULT_EXPERT_MODEL_DIR_CIFAR if dataset == "cifar" else DEFAULT_EXPERT_MODEL_DIR_MNIST
+		)
+	else:
+		expert_model_dir = args.expert_model_dir
 
 	all_results, errors = run_analysis(
 		input_dir=args.input_dir,
 		output_dir=args.output_dir,
 		project_root=_PROJECT_ROOT,
-		expert_model_dir=args.expert_model_dir,
+		expert_model_dir=expert_model_dir,
 		n_checkpoint_samples=args.n_checkpoint_samples,
 		score_factors=score_factors,
 		rescore=args.rescore,
@@ -135,6 +150,7 @@ def main(argv: list[str] | None = None) -> int:
 		btsp_start_strategy=args.btsp_start_strategy,
 		use_real_progression=args.use_real_progression,
 		verbose_errors=args.verbose_errors,
+		dataset=dataset,
 		experiment_id=args.experiment_id,
 		optimizer_id=args.optimizer_id,
 	)

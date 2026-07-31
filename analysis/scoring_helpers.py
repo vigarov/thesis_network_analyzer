@@ -13,6 +13,7 @@ from models.unit_node_id import parse_unit_node_id
 from analysis.constants import _NETWORK_N_DIGITS, _NETWORK_SAMPLES_PER_DIGIT
 from analysis.IQA_optimization.SteerPyrComplex import SteerablePyramid
 from analysis.rdx import compute_G, distance_to_rank
+from analysis.grad_nam import grad_nam_maps_for_neuron_from_nts
 from analysis.scoring_constants import (
 	MNIST_IMAGE_SHAPE,
 	N_SAMPLES_PER_TRIAL,
@@ -1220,7 +1221,20 @@ def get_normalize_ssims(period_ssims, layer_ssims):
 	return normalized
 
 
-def get_cross_sample_distances_from_maps(model_saliency_maps, *, data_range, compute_full_grid=False, prebuilt_pyramids: dict | None = None):
+def map_pairwise_mse(map_a, map_b) -> float:
+	a = np.asarray(map_a, dtype=np.float64)
+	b = np.asarray(map_b, dtype=np.float64)
+	return float(np.mean((a - b) ** 2))
+
+
+def get_cross_sample_distances_from_maps(
+	model_saliency_maps,
+	*,
+	data_range,
+	compute_full_grid=False,
+	prebuilt_pyramids: dict | None = None,
+	map_metric: str = "cw_ssim",
+):
 	"""
 	`MSSIM` for a model, cross samples for:
 		* a given digit when compute_full_grid = False
@@ -1230,6 +1244,8 @@ def get_cross_sample_distances_from_maps(model_saliency_maps, *, data_range, com
 	"""
 	if prebuilt_pyramids is None:
 		prebuilt_pyramids = {}
+	if map_metric not in {"cw_ssim", "mse"}:
+		raise ValueError(f"map_metric must be 'cw_ssim' or 'mse', got {map_metric!r}")
 	out_records = {}
 	if compute_full_grid:
 		if model_saliency_maps.shape[:2] != (_NETWORK_N_DIGITS, _NETWORK_SAMPLES_PER_DIGIT):
@@ -1245,34 +1261,41 @@ def get_cross_sample_distances_from_maps(model_saliency_maps, *, data_range, com
 				for i in range(_NETWORK_SAMPLES_PER_DIGIT):
 					j_start = i if d1 == d2 else 0
 					for j in range(j_start, _NETWORK_SAMPLES_PER_DIGIT):
-						if USE_CW_SSIM:
-							similarity  = cw_ssim_with_gauss(
-								model_saliency_maps[d1,i],
-								model_saliency_maps[d2,j],
-								data_range = data_range,
+						if map_metric == "mse":
+							value = map_pairwise_mse(
+								model_saliency_maps[d1, i],
+								model_saliency_maps[d2, j],
+							)
+						elif USE_CW_SSIM:
+							value = cw_ssim_with_gauss(
+								model_saliency_maps[d1, i],
+								model_saliency_maps[d2, j],
+								data_range=data_range,
 								prebuilt_pyramids=prebuilt_pyramids,
 							)
 						else:
 							mssim, _ = _mssim(
-								model_saliency_maps[d1,i],
-								model_saliency_maps[d2,j],
+								model_saliency_maps[d1, i],
+								model_saliency_maps[d2, j],
 								full=False,
 							)
-							similarity = float(mssim)
-						out_index = (d1*_NETWORK_SAMPLES_PER_DIGIT + i,d2*_NETWORK_SAMPLES_PER_DIGIT + j)
-						similarity_grid[*out_index] = similarity
+							value = float(mssim)
+						out_index = (d1 * _NETWORK_SAMPLES_PER_DIGIT + i, d2 * _NETWORK_SAMPLES_PER_DIGIT + j)
+						similarity_grid[*out_index] = value
 						if out_index[0] != out_index[1]:
-							similarity_grid[*out_index[::-1]] = similarity
+							similarity_grid[*out_index[::-1]] = value
 
 	else:
 		similarity_grid = np.empty((_NETWORK_SAMPLES_PER_DIGIT, _NETWORK_SAMPLES_PER_DIGIT), dtype=np.float64)
 		for i in range(_NETWORK_SAMPLES_PER_DIGIT):
 			for j in range(i, _NETWORK_SAMPLES_PER_DIGIT):
-				if USE_CW_SSIM:
-					similarity = cw_ssim_with_gauss(
+				if map_metric == "mse":
+					value = map_pairwise_mse(model_saliency_maps[i], model_saliency_maps[j])
+				elif USE_CW_SSIM:
+					value = cw_ssim_with_gauss(
 						model_saliency_maps[i],
 						model_saliency_maps[j],
-						data_range = data_range,
+						data_range=data_range,
 						prebuilt_pyramids=prebuilt_pyramids,
 					)
 				else:
@@ -1281,10 +1304,10 @@ def get_cross_sample_distances_from_maps(model_saliency_maps, *, data_range, com
 						model_saliency_maps[j],
 						full=False,
 					)
-					similarity = float(mssim)
-				similarity_grid[i,j] = similarity
+					value = float(mssim)
+				similarity_grid[i, j] = value,
 				if i != j:
-					similarity_grid[j, i] = similarity  # Symmetry
+					similarity_grid[j, i] = value
 	
 	out_records["cross_sample_distances"] = similarity_grid # (S,S) or (D,S,S)
 	return out_records
@@ -1347,9 +1370,21 @@ def get_all_cross_sample_distances(recovery_periods, period_saliency_maps, exper
 	return df_distances_model, df_distances_expert
 
 
-def compute_repr_sim_factor(nts, neuron_id, period_id, model_similarities, expert_similarities, recovery_periods):
-	d1,d2 = 1/model_similarities,1/expert_similarities
-	G_se = compute_G(distance_to_rank(d1),distance_to_rank(d2))
+def compute_repr_sim_factor(
+	nts,
+	neuron_id,
+	period_id,
+	model_similarities,
+	expert_similarities,
+	recovery_periods,
+	*,
+	invert_grids: bool = True,
+):
+	if invert_grids:
+		d1, d2 = 1 / model_similarities, 1 / expert_similarities
+	else:
+		d1, d2 = model_similarities, expert_similarities
+	G_se = compute_G(distance_to_rank(d1), distance_to_rank(d2))
 	assigned_digits = get_assigned_digits_for_trial_activations(nts,recovery_periods,neuron_id,period_id)
 	sampled = sample_ics_for_digits(assigned_digits)
 	idcs_of_interest = np.ix_(sampled,sampled)
@@ -1993,6 +2028,101 @@ def final_stream_repr_distance_through_time(
 		if torch.cuda.is_available():
 			torch.cuda.empty_cache()
 
+	df_repr = pd.DataFrame(repr_records).set_index(index_grp + ["checkpoint_idx"])
+	if not checkpoint_df.empty and "iteration" in checkpoint_df.columns:
+		iter_merge = checkpoint_df[index_grp + ["checkpoint_idx", "iteration"]].drop_duplicates(
+			subset=index_grp + ["checkpoint_idx"]
+		)
+		df_repr = (
+			df_repr.reset_index()
+			.merge(iter_merge, on=index_grp + ["checkpoint_idx"], how="left")
+			.set_index(index_grp + ["checkpoint_idx"])
+		)
+	return df_repr
+
+
+def final_stream_grad_nam_repr_distance_through_time(
+	nts,
+	recovery_periods,
+	expert_saliency,
+	checkpoint_df: pd.DataFrame,
+	conv_acts: np.ndarray,
+	*,
+	target_size: tuple[int, int],
+	device=None,
+	map_metric: str = "mse",
+	invert_grids: bool = False,
+) -> pd.DataFrame:
+	"""CIFAR Grad-NAM path: cached pre-GAP conv acts + NTS DNN Jacobians at each checkpoint."""
+	assert map_metric == "mse", "CW-SSIM is unstable with Grad-NAM maps (see local grad_cam_tests.ipynb)"
+	assert not invert_grids, "Actually, we don't want to invert the grids for the CIFAR Grad-NAM maps since we use MSE which is already well ordered"
+	device = torch.device(device) if device is not None else torch.device(
+		"cuda" if torch.cuda.is_available() else "cpu"
+	)
+	if checkpoint_df.empty:
+		return pd.DataFrame(
+			columns=index_grp + ["checkpoint_idx", "repr_distance"]
+		).set_index(index_grp + ["checkpoint_idx"])
+
+	expert_grid_cache: dict = {}
+	repr_records: list[dict] = []
+
+	for checkpoint_idx, checkpoint_rows in tqdm(
+		checkpoint_df.groupby("checkpoint_idx", sort=True),
+		desc="Computing Grad-NAM repr_distance through time",
+	):
+		checkpoint_idx = int(checkpoint_idx)
+		for row in checkpoint_rows.to_dict("records"):
+			nid, pid = row["neuron_id"], row["period_id"]
+			model_maps = _stack_saliency_maps_for_mssim(
+				grad_nam_maps_for_neuron_from_nts(
+					conv_acts,
+					nts,
+					checkpoint_idx,
+					nid,
+					target_size=target_size,
+					device=device,
+				),
+				keep_torch=False,
+			)
+
+			if nid not in expert_grid_cache:
+				exp_maps = _stack_saliency_maps_for_mssim(
+					expert_saliency[nid],
+					keep_torch=False,
+				)
+				expert_grid_cache[nid] = get_cross_sample_distances_from_maps(
+					exp_maps,
+					data_range=0.0,
+					compute_full_grid=True,
+					map_metric=map_metric,
+				)["cross_sample_distances"]
+
+			model_distances = get_cross_sample_distances_from_maps(
+				model_maps,
+				data_range=0.0,
+				compute_full_grid=True,
+				map_metric=map_metric,
+			)["cross_sample_distances"]
+
+			repr_records.append(
+				{
+					"neuron_id": nid,
+					"period_id": pid,
+					"checkpoint_idx": checkpoint_idx,
+					"repr_distance": compute_repr_sim_factor(
+						nts,
+						nid,
+						pid,
+						model_distances,
+						expert_grid_cache[nid],
+						recovery_periods,
+						invert_grids=invert_grids,
+					),
+				}
+			)
+	
+	# Format final df
 	df_repr = pd.DataFrame(repr_records).set_index(index_grp + ["checkpoint_idx"])
 	if not checkpoint_df.empty and "iteration" in checkpoint_df.columns:
 		iter_merge = checkpoint_df[index_grp + ["checkpoint_idx", "iteration"]].drop_duplicates(

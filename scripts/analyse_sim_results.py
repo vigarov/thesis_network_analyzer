@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 import pandas as pd
+import torch
 from tqdm.auto import tqdm
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -19,16 +20,24 @@ if str(_PROJECT_ROOT) not in sys.path:
 	sys.path.insert(0, str(_PROJECT_ROOT))
 
 from analysis.constants import set_results_root
+from analysis.dataset_filter import prepare_results_tree
 from analysis.final.final_compare_all_optimizers_helpers import (
 	_load_run_checkpoint,
+	_load_run_config,
+	_parse_seed_from_config,
 	_save_run_checkpoint,
 	final_run_one,
+	get_cifar_eval_inputs,
 	minmax_normalize_robustness_all_results,
 	reparse_digit_a_final_run,
 	rescore_final_run,
 )
+from analysis.grad_nam import build_pre_gap_conv_cache_entry
 from analysis.io import scan_results
 from scripts.utils.cluster_utils import add_output_dir_argument
+
+DEFAULT_EXPERT_MODEL_DIR_MNIST = "pretrained_models/expert/!OPT/"
+DEFAULT_EXPERT_MODEL_DIR_CIFAR = "pretrained_models/cifar10_!ARCH/expert/!OPT/!SD/"
 
 DEFAULT_SCORE_FACTORS: dict[str, float] = {
 	"angle_score": 1.0,
@@ -66,12 +75,20 @@ def build_parser() -> argparse.ArgumentParser:
 		required=True,
 	)
 	p.add_argument(
+		"--dataset",
+		default="mnist",
+		help="Dataset family (default: mnist). Accepts cifar / cifar10.",
+	)
+	p.add_argument(
 		"--expert-model-dir",
 		type=str,
-		default="pretrained_models/expert/!OPT/",
+		default=None,
 		help=(
 			"Expert saliency checkpoints relative to project root "
-			"(!OPT → optimizer id; !SD → config.json seed, appended if omitted)."
+			"(!OPT → optimizer id; !ARCH → inception/resnet for CIFAR; "
+			"!SD → config.json seed, appended if omitted). "
+			f"Default: MNIST {DEFAULT_EXPERT_MODEL_DIR_MNIST!r}, "
+			f"CIFAR {DEFAULT_EXPERT_MODEL_DIR_CIFAR!r}."
 		),
 	)
 	p.add_argument(
@@ -132,6 +149,46 @@ def build_parser() -> argparse.ArgumentParser:
 	return p
 
 
+def get_pre_gap_conv_acts(
+	tree: dict,
+	project_root: Path,
+	*,
+	experiment_id: str | None = None,
+	optimizer_id: str | None = None,
+) -> dict[tuple[str, str, int], Any]:
+	"""Warm up pre-GAP conv activation cache for unique (mid, oid, seed) keys."""
+	device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+	cache: dict[tuple[str, str, int], Any] = {}
+	seen: set[tuple[str, str, int]] = set()
+
+	for eid, models in tqdm(sorted(tree.items()), desc="Pre-GAP conv cache"):
+		if experiment_id is not None and eid != experiment_id:
+			continue
+		for mid, runs in sorted(models.items()):
+			for rid, oids in sorted(runs.items()):
+				for oid in oids:
+					if optimizer_id is not None and oid != optimizer_id:
+						continue
+					seed = _parse_seed_from_config(eid, mid, rid)
+					key = (mid, oid, seed)
+					if key in seen:
+						continue
+					seen.add(key)
+					config = _load_run_config(eid, mid, rid)
+					eval_inputs = get_cifar_eval_inputs(mid, device)
+					cache[key] = build_pre_gap_conv_cache_entry(
+						use_initial_model=config["use_initial_model"],
+						model_class=config["model_class"],
+						model_config=config["model_config"],
+						mid=mid,
+						oid=oid,
+						seed=seed,
+						eval_inputs=eval_inputs,
+						device=device,
+					)
+	return cache
+
+
 def run_analysis(
 	*,
 	input_dir: Path,
@@ -147,6 +204,7 @@ def run_analysis(
 	btsp_start_strategy: str,
 	use_real_progression: bool,
 	verbose_errors: bool,
+	dataset: str = "mnist",
 	experiment_id: str | None = None,
 	optimizer_id: str | None = None,
 ) -> tuple[dict[tuple[str, str, str, str], dict], list[dict[str, Any]]]:
@@ -154,7 +212,21 @@ def run_analysis(
 	output_dir.mkdir(parents=True, exist_ok=True)
 
 	tree = scan_results()
+	tree, skipped = prepare_results_tree(tree, dataset)
+	for msg in skipped:
+		print(f"Skipping CIFAR experiment: {msg}")
+
 	prebuilt_pyramids: dict = {}
+	pre_gap_conv_cache: dict[tuple[str, str, int], Any] | None = None
+	if dataset == "cifar":
+		# See report, for Inception/Resnet we need the post-last-conv activations to compute the Grad-NAM
+		pre_gap_conv_cache = get_pre_gap_conv_acts(
+			tree,
+			project_root,
+			experiment_id=experiment_id,
+			optimizer_id=optimizer_id,
+		)
+
 	expert_saliency_by_oid: dict[str, dict] | None = {}
 	all_results: dict[tuple[str, str, str, str], dict] = {}
 	errors: list[dict[str, Any]] = []
@@ -202,6 +274,8 @@ def run_analysis(
 							use_real_progression=use_real_progression,
 							expert_model_dir=expert_model_dir,
 							score_factors=score_factors,
+							dataset=dataset,
+							pre_gap_conv_cache=pre_gap_conv_cache,
 						)
 					except Exception as exc:
 						tb = traceback.format_exc()
@@ -252,13 +326,20 @@ def run_analysis(
 
 def main(argv: list[str] | None = None) -> int:
 	args = build_parser().parse_args(argv)
+	dataset = args.dataset[:5]
 	score_factors = args.score_factors if args.score_factors is not None else dict(DEFAULT_SCORE_FACTORS)
+	if args.expert_model_dir is None:
+		expert_model_dir = (
+			DEFAULT_EXPERT_MODEL_DIR_CIFAR if dataset == "cifar" else DEFAULT_EXPERT_MODEL_DIR_MNIST
+		)
+	else:
+		expert_model_dir = args.expert_model_dir
 
 	all_results, errors = run_analysis(
 		input_dir=args.input_dir,
 		output_dir=args.output_dir,
 		project_root=_PROJECT_ROOT,
-		expert_model_dir=args.expert_model_dir,
+		expert_model_dir=expert_model_dir,
 		n_checkpoint_samples=args.n_checkpoint_samples,
 		score_factors=score_factors,
 		rescore=args.rescore,
@@ -268,6 +349,7 @@ def main(argv: list[str] | None = None) -> int:
 		btsp_start_strategy=args.btsp_start_strategy,
 		use_real_progression=args.use_real_progression,
 		verbose_errors=args.verbose_errors,
+		dataset=dataset,
 	)
 
 	print(f"Loaded/saved {len(all_results)} runs; {len(errors)} errors")

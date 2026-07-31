@@ -33,6 +33,7 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
 	sys.path.insert(0, str(_PROJECT_ROOT))
 
+from analysis.dataset_filter import prepare_results_tree
 from analysis.constants import set_results_root
 from analysis.final.final_compare_all_optimizers_helpers import _load_run_checkpoint
 from analysis.io import scan_results
@@ -118,10 +119,15 @@ def _slurm_job_name(eid: str, oid: str) -> str:
 	return base[:64]
 
 
-def collect_experiment_optimizer_jobs(results_dir: Path) -> list[ExperimentOptimizerJob]:
+def collect_experiment_optimizer_jobs(
+	results_dir: Path,
+	*,
+	dataset: str = "mnist",
+) -> tuple[list[ExperimentOptimizerJob], list[str]]:
 	"""Return sorted shard jobs from the on-disk results tree."""
 	set_results_root(results_dir)
 	tree = scan_results(refresh=True, w_cache=False)
+	tree, skipped = prepare_results_tree(tree, dataset)
 
 	pairs: dict[tuple[str, str], set[tuple[str, str]]] = {}
 	for eid, models in tree.items():
@@ -139,7 +145,7 @@ def collect_experiment_optimizer_jobs(results_dir: Path) -> list[ExperimentOptim
 				runs=tuple(sorted(run_set)),
 			)
 		)
-	return jobs
+	return jobs, skipped
 
 
 def _shard_complete(
@@ -160,6 +166,12 @@ def _format_extra_analyse_args(args: argparse.Namespace) -> tuple[str, list[str]
 		quoted = _bash_quote(args.expert_model_dir)
 		lines.append(f'ANALYSE_ARGS+=(--expert-model-dir {quoted})')
 		cli_args.extend(["--expert-model-dir", args.expert_model_dir])
+
+	dataset = args.dataset[:5]
+	if dataset != "mnist":
+		quoted = _bash_quote(dataset)
+		lines.append(f"ANALYSE_ARGS+=(--dataset {quoted})")
+		cli_args.extend(["--dataset", dataset])
 
 	if args.n_checkpoint_samples != 20:
 		lines.append(f"ANALYSE_ARGS+=(--n-checkpoint-samples {args.n_checkpoint_samples})")
@@ -399,10 +411,15 @@ def build_parser() -> argparse.ArgumentParser:
 		),
 	)
 	p.add_argument(
+		"--dataset",
+		default="mnist",
+		help="Dataset family (default: mnist). Accepts cifar / cifar10.",
+	)
+	p.add_argument(
 		"--expert-model-dir",
 		type=str,
 		default=None,
-		help="Forwarded to analyse_one.py (default: pretrained_models/expert/!OPT/).",
+		help="Forwarded to analyse_one.py (default: dataset-specific).",
 	)
 	p.add_argument(
 		"--n-checkpoint-samples",
@@ -485,7 +502,9 @@ def main(argv: list[str] | None = None) -> int:
 		print(f"ERROR: results dir not found: {results_dir}", file=sys.stderr)
 		return 1
 
-	jobs = collect_experiment_optimizer_jobs(results_dir)
+	jobs, skipped = collect_experiment_optimizer_jobs(results_dir, dataset=args.dataset[:5])
+	for msg in skipped:
+		print(f"Skipping CIFAR experiment: {msg}")
 	if not jobs:
 		print(f"No completed optimizer runs found under {results_dir}", file=sys.stderr)
 		return 1
