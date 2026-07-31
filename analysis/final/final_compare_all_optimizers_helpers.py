@@ -28,11 +28,13 @@ from analysis.common import (
 	_sort_optimizer_ids,
 )
 from analysis.constants import RESULTS, _NETWORK_SAMPLES_PER_DIGIT
+from analysis.dataset_filter import mid_to_arch_slug, mid_to_model_class
 from analysis.io import _metrics, _nts, _pp_dead, _pp_neuron_digit
 from analysis.final.final_experiment_display import (
 	ExperimentDisplayLabels,
 	two_row_cat12_from_sorted,
 )
+from analysis.grad_nam import grad_nam_expert_saliency_for_neurons, target_size_for_mid
 from analysis.plot_helpers import add_trial_boundaries_mpl
 from compute_results.pretrain import resolve_save_root
 
@@ -41,6 +43,7 @@ from analysis.scoring_helpers import (
 	filter_periods,
 	find_impacted_periods,
 	final_compute_period_repr_trajectory_summary,
+	final_stream_grad_nam_repr_distance_through_time,
 	final_stream_repr_distance_through_time,
 	get_all_model_saliency_maps,
 	get_all_points_of_max_acceleration,
@@ -137,9 +140,11 @@ def _resolve_expert_dir(
 	mid: str,
 	rid: str,
 ) -> Path:
-	"""Expand ``!OPT`` / ``!SD`` using the run's ``config.json`` ``seed``."""
+	"""Expand `!OPT` / `!SD` using the run's `config.json` `seed`."""
 	seed = _parse_seed_from_config(eid, mid, rid)
 	template = expert_model_dir
+	if "!ARCH" in template:
+		template = template.replace("!ARCH", mid_to_arch_slug(mid))
 	if "!SD" not in template:
 		template = f"{template.rstrip('/')}/!SD/"
 	expert_dir = resolve_save_root(template, slug=oid, seed=seed)
@@ -313,6 +318,36 @@ class DummyExp(MNISTWrapper):
 	def _build_trials(self, batch_size: int, seed: int, *, num_experiment_runs: int):
 		return []
 
+
+class _CifarEvalWrapper(MNISTWrapper):
+	def experiment_id(self):
+		return ""
+
+	def _build_trials(self, batch_size: int, seed: int, *, num_experiment_runs: int):
+		return []
+
+
+_CIFAR_EVAL_CACHE: dict[tuple[int, str], _CifarEvalWrapper] = {}
+
+
+def get_cifar_eval_inputs(mid: str, device: torch.device) -> torch.Tensor:
+	"""50 eval samples with architecture-specific CIFAR-10 crop and normalization."""
+	from experiments.dataset_registry import NORM_CIFAR_CHANNEL, NORM_PER_IMAGE_WHITENING
+
+	if mid.startswith("inception"):
+		key = (28, NORM_PER_IMAGE_WHITENING)
+	elif mid.startswith("resnet"):
+		key = (32, NORM_CIFAR_CHANNEL)
+	else:
+		raise ValueError(f"Unsupported CIFAR model_id for eval inputs: {mid!r}")
+	if key not in _CIFAR_EVAL_CACHE:
+		_CIFAR_EVAL_CACHE[key] = _CifarEvalWrapper(
+			dataset="cifar10",
+			input_size=key[0],
+			normalization=key[1],
+		)
+	return _CIFAR_EVAL_CACHE[key].evaluation_inputs(device)[0]
+
 # --- core compute ---
 def collect_final_run_data(
 	eid: str,
@@ -329,6 +364,8 @@ def collect_final_run_data(
 	use_real_progression: bool,
 	expert_model_dir: str,
 	score_factors: dict[str, float],
+	dataset: str = "mnist",
+	pre_gap_conv_cache: dict[tuple[str, str, int], np.ndarray] | None = None,
 ) -> dict[str, Any]:
 	"""Load post-processed data, sample `n_checkpoint_samples` checkpoints uniformly, stream `repr_distance`, build per-period table."""
 	root = project_root
@@ -435,9 +472,16 @@ def collect_final_run_data(
 	)
 
 	device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-	eval_digits = DummyExp().evaluation_inputs(device)[0]
+	is_cifar = dataset == "cifar"
+	if is_cifar:
+		eval_digits = get_cifar_eval_inputs(mid, device)
+	else:
+		eval_digits = DummyExp().evaluation_inputs(device)[0]
 
-	_, prebuilt_pyramids = init_cw_ssim_pyramid(device, prebuilt_pyramids)
+	if is_cifar:
+		prebuilt_pyramids = {}
+	else:
+		_, prebuilt_pyramids = init_cw_ssim_pyramid(device, prebuilt_pyramids)
 
 	required_nids = list(recovery_periods["neuron_id"].unique())
 	expert_dir = _resolve_expert_dir(
@@ -445,7 +489,53 @@ def collect_final_run_data(
 	)
 	expert_cache_key = str(expert_dir.resolve())
 	expert_saliency: dict
-	if expert_saliency_by_oid is not None and expert_cache_key in expert_saliency_by_oid:
+	cifar_model_class = mid_to_model_class(mid) if is_cifar else ""
+
+	if is_cifar:
+
+		if expert_saliency_by_oid is not None and expert_cache_key in expert_saliency_by_oid:
+			expert_saliency = expert_saliency_by_oid[expert_cache_key]
+			missing = [nid for nid in required_nids if nid not in expert_saliency]
+			if missing:
+				report = json.loads((expert_dir / "report.json").read_text())
+				expert_model = get_model(report["model_class"], **report["model_config"]).to(device)
+				expert_model.load_state_dict(
+					torch.load(expert_dir / "model.pt", map_location="cpu", weights_only=True)
+				)
+				expert_model.eval()
+				extra = grad_nam_expert_saliency_for_neurons(
+					expert_model,
+					eval_digits,
+					cifar_model_class,
+					missing,
+					device=device,
+				)
+				expert_saliency.update(extra)
+				expert_model.cpu()
+				del expert_model
+				if torch.cuda.is_available():
+					torch.cuda.empty_cache()
+		else:
+			report = json.loads((expert_dir / "report.json").read_text())
+			expert_model = get_model(report["model_class"], **report["model_config"]).to(device)
+			expert_model.load_state_dict(
+				torch.load(expert_dir / "model.pt", map_location="cpu", weights_only=True)
+			)
+			expert_model.eval()
+			expert_saliency = grad_nam_expert_saliency_for_neurons(
+				expert_model,
+				eval_digits,
+				cifar_model_class,
+				required_nids,
+				device=device,
+			)
+			expert_model.cpu()
+			del expert_model
+			if torch.cuda.is_available():
+				torch.cuda.empty_cache()
+			if expert_saliency_by_oid is not None:
+				expert_saliency_by_oid[expert_cache_key] = expert_saliency
+	elif expert_saliency_by_oid is not None and expert_cache_key in expert_saliency_by_oid:
 		expert_saliency = expert_saliency_by_oid[expert_cache_key]
 		missing = [nid for nid in required_nids if nid not in expert_saliency]
 		if missing:
@@ -486,14 +576,33 @@ def collect_final_run_data(
 		peak_time_aggregate=peak_agg,
 	)
 
-	df_repr_tt = final_stream_repr_distance_through_time(
-		nts,
-		recovery_periods,
-		expert_saliency,
-		checkpoint_df,
-		device=device,
-		prebuilt_pyramids=prebuilt_pyramids,
-	)
+	if is_cifar:
+		if pre_gap_conv_cache is None:
+			raise ValueError("pre_gap_conv_cache is required for CIFAR analysis")
+		seed = _parse_seed_from_config(eid, mid, rid)
+		cache_key = (mid, oid, seed)
+		if cache_key not in pre_gap_conv_cache:
+			raise KeyError(f"Missing pre-GAP conv cache for {cache_key!r}")
+		df_repr_tt = final_stream_grad_nam_repr_distance_through_time(
+			nts,
+			recovery_periods,
+			expert_saliency,
+			checkpoint_df,
+			pre_gap_conv_cache[cache_key],
+			target_size=target_size_for_mid(mid),
+			device=device,
+			map_metric="mse",
+			invert_grids=False,
+		)
+	else:
+		df_repr_tt = final_stream_repr_distance_through_time(
+			nts,
+			recovery_periods,
+			expert_saliency,
+			checkpoint_df,
+			device=device,
+			prebuilt_pyramids=prebuilt_pyramids,
+		)
 
 	summary = final_compute_period_repr_trajectory_summary(df_repr_tt, recovery_periods)
 	if summary.empty:
@@ -600,6 +709,8 @@ def final_run_one(
 	use_real_progression: bool,
 	expert_model_dir: str,
 	score_factors: dict[str, float],
+	dataset: str = "mnist",
+	pre_gap_conv_cache: dict[tuple[str, str, int], np.ndarray] | None = None,
 ) -> dict[str, Any]:
 	collected = collect_final_run_data(
 		eid,
@@ -615,6 +726,8 @@ def final_run_one(
 		use_real_progression=use_real_progression,
 		expert_model_dir=expert_model_dir,
 		score_factors=score_factors,
+		dataset=dataset,
+		pre_gap_conv_cache=pre_gap_conv_cache,
 	)
 	return collected
 
