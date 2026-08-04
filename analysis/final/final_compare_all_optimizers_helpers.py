@@ -64,6 +64,8 @@ from analysis.scoring_helpers import (
 	index_grp,
 )
 
+from analysis.final.plot_dataset_context import insert_filename_suffix
+
 # --- checkpoint I/O + rescore ---
 def _run_checkpoint_dir(save_dir: str, eid: str, mid: str, oid: str, rid: str) -> Path:
 	sha = hashlib.sha256(f"{eid}|{mid}|{oid}|{rid}".encode("utf-8")).hexdigest()[:10]
@@ -261,9 +263,10 @@ def minmax_normalize_robustness_all_results(
 	*,
 	save_dir: str,
 ) -> int:
-	"""Min-max normalize `robustness_score` across all runs, rescore, and save."""
-	pending_keys: list[tuple[str, str, str, str]] = []
-	raw_values: list[float] = []
+	"""Min-max normalize `robustness_score` per `model_id`, rescore, and save."""
+	pending_by_modelid: dict[str, list[tuple[str, str, str, str]]] = {}
+	raw_by_modelid: dict[str, list[float]] = {}
+
 	for key, out in all_results.items():
 		if out.get("error"):
 			continue
@@ -272,41 +275,48 @@ def minmax_normalize_robustness_all_results(
 			continue
 		if "minmax_normalized_robustness_scores" in df.columns:
 			continue
-		pending_keys.append(key)
-		raw_values.extend(
+		_eid, mid, _oid, _rid = key
+		pending_by_modelid.setdefault(mid, []).append(key)
+		raw_by_modelid.setdefault(mid, []).extend(
 			pd.to_numeric(df["robustness_score"], errors="coerce").dropna().astype(float).tolist()
 		)
-	if not pending_keys or not raw_values:
+
+	if not pending_by_modelid:
 		return 0
 
-	r_min = float(np.min(raw_values))
-	r_max = float(np.max(raw_values))
-	denom = r_max - r_min
-
-	def _normalize_value(value: float) -> float:
-		if denom == 0.0:
-			return 0.0
-		return (value - r_min) / denom
-
 	n_saved = 0
-	for key in pending_keys:
-		eid, mid, oid, rid = key
-		out = {**all_results[key]}
-		df = out["periods_df"].copy()
-		r = pd.to_numeric(df["robustness_score"], errors="coerce")
-		df["minmax_normalized_robustness_scores"] = r.map(
-			lambda x: _normalize_value(float(x)) if pd.notna(x) else np.nan
-		)
-		df = apply_score_factors_to_periods_df(
-			df,
-			score_factors,
-			use_minmax_normalized_robustness=True,
-		)
-		out["periods_df"] = df
-		out["mean_total_score"] = float(pd.to_numeric(df["total_score"], errors="coerce").mean())
-		all_results[key] = out
-		_save_run_checkpoint(save_dir, eid, mid, oid, rid, out)
-		n_saved += 1
+	for mid, pending_keys in pending_by_modelid.items():
+		raw_values = raw_by_modelid.get(mid, [])
+		if not pending_keys or not raw_values:
+			continue
+
+		r_min = float(np.min(raw_values))
+		r_max = float(np.max(raw_values))
+		denom = r_max - r_min
+
+		def _normalize_value(value: float, *, _r_min=r_min, _denom=denom) -> float:
+			if _denom == 0.0:
+				return 0.0
+			return (value - _r_min) / _denom
+
+		for key in pending_keys:
+			eid, key_mid, oid, rid = key
+			out = {**all_results[key]}
+			df = out["periods_df"].copy()
+			r = pd.to_numeric(df["robustness_score"], errors="coerce")
+			df["minmax_normalized_robustness_scores"] = r.map(
+				lambda x: _normalize_value(float(x)) if pd.notna(x) else np.nan
+			)
+			df = apply_score_factors_to_periods_df(
+				df,
+				score_factors,
+				use_minmax_normalized_robustness=True,
+			)
+			out["periods_df"] = df
+			out["mean_total_score"] = float(pd.to_numeric(df["total_score"], errors="coerce").mean())
+			all_results[key] = out
+			_save_run_checkpoint(save_dir, eid, key_mid, oid, rid, out)
+			n_saved += 1
 	return n_saved
 
 
@@ -1880,7 +1890,7 @@ def facet_bincount_novelty_offset_by_experiment(
 			auc_parts.append(auc_sub)
 			ax.set_xlim(*novelty_offset_xlim(sub))
 			ax.set_ylim(0.0, 1.0)
-		ax.set_ylabel("proportion" if _novelty_offset_uses_bins(mode) else "eCDF")
+		ax.set_ylabel("Proportion" if _novelty_offset_uses_bins(mode) else "Percentile")
 		ax.set_title(str(exp))
 		ax.tick_params(axis="y", labelsize=10)
 		ax.tick_params(axis="x", labelsize=10)
@@ -2267,7 +2277,8 @@ def facet_lines_exp_d_tk(
 			ax.set_visible(False)
 	fig.suptitle(title, y=1.02, fontsize=14)
 	plt.tight_layout()
-	plt.savefig(Path(plot_dir) / filename, bbox_inches="tight")
+	if filename is not None:
+		plt.savefig(Path(plot_dir) / filename, bbox_inches="tight")
 	plt.show()
 
 
@@ -2376,6 +2387,7 @@ def build_df_long(
 			continue
 		periods_df = periods_df.copy()
 		periods_df["experiment_id"] = eid
+		periods_df["model_id"] = mid
 		periods_df["optimizer_id"] = oid
 		periods_df["experiment"] = periods_df["experiment_id"].map(rename_fn)
 		for col in [
@@ -2392,7 +2404,9 @@ def build_df_long(
 		]:
 			if col not in periods_df.columns:
 				continue
-			sub = periods_df[["experiment_id", "experiment", "optimizer_id", col]].dropna(subset=[col])
+			sub = periods_df[
+				["experiment_id", "model_id", "experiment", "optimizer_id", col]
+			].dropna(subset=[col])
 			sub = sub.rename(columns={col: "value"})
 			sub["metric"] = col
 			rows_plot.extend(sub.to_dict("records"))
@@ -2765,6 +2779,8 @@ def plot_experiment_training_loss(
 	default_max_iter: float,
 	show: bool = True,
 	all_results: dict[tuple[str, str, str, str], dict] | None = None,
+	filename_suffix: str = "",
+	title_suffix: str = "",
 ) -> None:
 	"""Full training loss; cat2 experiments also get an early-trials zoom panel."""
 	oids = _sort_optimizer_ids(oids)
@@ -2818,13 +2834,13 @@ def plot_experiment_training_loss(
 		axes[0, 0].set_xlabel(x_label)
 
 	exp_label = rename_fn(eid)
-	title = fr"{exp_label} ‒ training loss"
+	title = fr"{exp_label} ‒ training loss{title_suffix}"
 	if with_zoom:
 		title += f" (first {n_trials} trials below)"
 	fig.suptitle(title, y=1.01 if with_zoom else 1.02, fontsize=14)
 	fig.tight_layout()
 
-	fname = f"final_training_loss_{_safe_slug(eid)}.pdf"
+	fname = insert_filename_suffix(f"final_training_loss_{_safe_slug(eid)}.pdf", filename_suffix)
 	plt.savefig(Path(plot_dir) / fname, bbox_inches="tight")
 	if show:
 		plt.show()
@@ -2842,6 +2858,8 @@ def plot_experiment_test_accuracy(
 	plot_dir: str,
 	show: bool = True,
 	all_results: dict[tuple[str, str, str, str], dict] | None = None,
+	filename_suffix: str = "",
+	title_suffix: str = "",
 ) -> None:
 	oids = _sort_optimizer_ids(oids)
 	first_m: dict | None = None
@@ -2875,10 +2893,12 @@ def plot_experiment_test_accuracy(
 	ax.legend(loc="best", fontsize=9, framealpha=0.92)
 
 	exp_label = rename_fn(eid)
-	fig.suptitle(fr"{exp_label} ‒ all_test accuracy", y=1.02, fontsize=14)
+	fig.suptitle(fr"{exp_label} ‒ all_test accuracy{title_suffix}", y=1.02, fontsize=14)
 	fig.tight_layout()
 
-	fname = f"final_training_accuracy_{_safe_slug(eid)}.pdf"
+	fname = insert_filename_suffix(
+		f"final_training_accuracy_{_safe_slug(eid)}.pdf", filename_suffix
+	)
 	plt.savefig(Path(plot_dir) / fname, bbox_inches="tight")
 	if show:
 		plt.show()
@@ -2975,6 +2995,8 @@ def plot_all_periods_optimizer_distribution(
 	*,
 	plot_dir: str,
 	sort_experiment_names: Callable[[Iterable[str]], list[str]],
+	filename_suffix: str = "",
+	title_suffix: str = "",
 ) -> None:
 	if not all_periods_by_experiment:
 		print("No category-experiment periods — skip optimizer distribution plot")
@@ -3008,12 +3030,17 @@ def plot_all_periods_optimizer_distribution(
 		ax.set_title(exp_label, fontsize=11)
 		ax.set_ylabel("n periods" if ax is axes_dist[0] else "")
 	fig_dist.suptitle(
-		"All BTSP periods per experiment (deep layers) ‒ optimizer mix",
+		f"All BTSP periods per experiment (deep layers) ‒ optimizer mix{title_suffix}",
 		y=1.04,
 		fontsize=13,
 	)
 	fig_dist.tight_layout()
-	plt.savefig(Path(plot_dir) / "final_all_periods_optimizer_distribution.pdf", bbox_inches="tight")
+
+	plt.savefig(
+		Path(plot_dir)
+		/ insert_filename_suffix("final_all_periods_optimizer_distribution.pdf", filename_suffix),
+		bbox_inches="tight",
+	)
 	plt.show()
 
 
@@ -3031,12 +3058,16 @@ def save_efflr_gamma_rel_category_figure(
 	plot_dir: str,
 	top_n_per_optimizer: int,
 	category_slug: str,
+	filename_suffix: str = "",
 ) -> None:
 	if fig is None:
 		return
 	plt.savefig(
 		Path(plot_dir)
-		/ f"final_top{top_n_per_optimizer}peropt_allstrategies_efflr_relgamma_{category_slug}.pdf",
+		/ insert_filename_suffix(
+			f"final_top{top_n_per_optimizer}peropt_allstrategies_efflr_relgamma_{category_slug}.pdf",
+			filename_suffix,
+		),
 		bbox_inches="tight",
 	)
 	plt.show()
