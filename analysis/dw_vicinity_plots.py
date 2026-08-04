@@ -31,6 +31,12 @@ from analysis.dw_vicinity import (
 	vlim_from_ratio_grid_triples,
 )
 
+from analysis.final.plot_dataset_context import insert_filename_suffix
+
+
+def _pdf_filename(name: str, filename_suffix: str) -> str:
+	return insert_filename_suffix(name, filename_suffix)
+
 STRATEGY_ORDER = ["angle", "length", "robustness", "total score"]
 
 STRATEGY_COLORS = {
@@ -83,6 +89,7 @@ def plot_dw_scatter_all_experiments(
 	parse_neuron_id: Callable[[str], str],
 	ncols: int = 10,
 	show: bool = True,
+	filename_suffix: str = "",
 ) -> None:
 	if df_dw.empty:
 		return
@@ -98,7 +105,8 @@ def plot_dw_scatter_all_experiments(
 		if fig_dw is not None:
 			slug = slugify_label(exp_label)
 			plt.savefig(
-				Path(plot_dir) / f"final_all_periods_dw_scatter_{slug}.pdf",
+				Path(plot_dir)
+				/ _pdf_filename(f"final_all_periods_dw_scatter_{slug}.pdf", filename_suffix),
 				bbox_inches="tight",
 			)
 			if show:
@@ -113,6 +121,7 @@ def plot_dw_heatmap_all_periods(
 	sort_experiment_names: Callable[[Any], list[str]],
 	two_row_cat12_from_sorted: Callable[[list[str]], tuple[list[str], list[str], list[str]]],
 	show: bool = True,
+	filename_suffix: str = "",
 ) -> None:
 	if df_dw.empty:
 		print("No period selections — skip aggregate Δw heatmaps")
@@ -128,7 +137,11 @@ def plot_dw_heatmap_all_periods(
 		fig_agg = plot_mean_tstart_vicinity_dw_heatmap(sel, experiment_label=exp_label)
 		if fig_agg is not None:
 			slug = slugify_label(exp_label)
-			plt.savefig(plot_dir / f"final_all_periods_dw_heatmap_mean_{slug}.pdf", bbox_inches="tight")
+			plt.savefig(
+				plot_dir
+				/ _pdf_filename(f"final_all_periods_dw_heatmap_mean_{slug}.pdf", filename_suffix),
+				bbox_inches="tight",
+			)
 			if show:
 				plt.show()
 
@@ -139,7 +152,13 @@ def plot_dw_heatmap_all_periods(
 	)
 	fig_all = plot_mean_tstart_vicinity_dw_heatmap(all_sel, experiment_label="all experiments")
 	if fig_all is not None:
-		plt.savefig(plot_dir / "final_all_periods_dw_heatmap_mean_all_experiments.pdf", bbox_inches="tight")
+		plt.savefig(
+			plot_dir
+			/ _pdf_filename(
+				"final_all_periods_dw_heatmap_mean_all_experiments.pdf", filename_suffix
+			),
+			bbox_inches="tight",
+		)
 		if show:
 			plt.show()
 
@@ -154,7 +173,10 @@ def plot_dw_heatmap_all_periods(
 		)
 		if fig_cat is not None:
 			plt.savefig(
-				plot_dir / f"final_all_periods_dw_heatmap_mean_{cat_label.lower()}.pdf",
+				plot_dir
+				/ _pdf_filename(
+					f"final_all_periods_dw_heatmap_mean_{cat_label.lower()}.pdf", filename_suffix
+				),
 				bbox_inches="tight",
 			)
 			if show:
@@ -170,6 +192,7 @@ def plot_dw_heatmap_topn_per_experiment(
 	top_n_per_experiment: int = 100,
 	filter_strategy: str = "angle",
 	show: bool = True,
+	filename_suffix: str = "",
 ) -> None:
 	if df_dw.empty:
 		print("No period selections — skip per-experiment top-N Δw heatmaps")
@@ -195,7 +218,11 @@ def plot_dw_heatmap_topn_per_experiment(
 		if fig_agg is not None:
 			slug = slugify_label(exp_label)
 			plt.savefig(
-				plot_dir / f"final_top{top_n_per_experiment}_{filter_strat_slug}_dw_heatmap_mean_{slug}.pdf",
+				plot_dir
+				/ _pdf_filename(
+					f"final_top{top_n_per_experiment}_{filter_strat_slug}_dw_heatmap_mean_{slug}.pdf",
+					filename_suffix,
+				),
 				bbox_inches="tight",
 			)
 			if show:
@@ -251,6 +278,7 @@ def plot_dw_heatmap_topn_strategy_grids(
 	df_dw_baseline: pd.DataFrame | list[pd.DataFrame] | None = None,
 	cmap: str = "RdBu_r",
 	show: bool = True,
+	filename_suffix: str = "",
 ) -> None:
 	if df_dw.empty:
 		print("No period selections — skip strategy-grid Δw heatmaps")
@@ -430,7 +458,10 @@ def plot_dw_heatmap_topn_strategy_grids(
 	)
 	plt.savefig(
 		plot_dir
-		/ f"final_top{top_n_per_experiment}_allstrategies_dw_heatmap_mean_all_experiments{file_tag}.pdf",
+		/ _pdf_filename(
+			f"final_top{top_n_per_experiment}_allstrategies_dw_heatmap_mean_all_experiments{file_tag}.pdf",
+			filename_suffix,
+		),
 		bbox_inches="tight",
 	)
 	if show:
@@ -609,7 +640,10 @@ def plot_dw_heatmap_topn_strategy_grids(
 			fig_grid.suptitle(grid_suptitle, fontsize=12, y=1.02)
 			plt.savefig(
 				plot_dir
-				/ f"final_top{top_n_per_optimizer}peropt_{strat_slug}_{cat_label.lower()}_dw_heatmap_grid{file_tag}.pdf",
+				/ _pdf_filename(
+					f"final_top{top_n_per_optimizer}peropt_{strat_slug}_{cat_label.lower()}_dw_heatmap_grid{file_tag}.pdf",
+					filename_suffix,
+				),
 				bbox_inches="tight",
 			)
 			if show:
@@ -1397,6 +1431,7 @@ def plot_dw_pre_post_strategy_facets_active_full(
 	*,
 	plot_dir: Path | str | None = None,
 	show: bool = True,
+	filename_suffix: str = "",
 ) -> None:
 	"""Stack active-only (top) and full-surrounding (bottom) per panel; 2 figures (Cat1/Cat2)."""
 	if facet_grid_active is None or not facet_grid_active.category_figures:
@@ -1592,9 +1627,9 @@ def plot_dw_pre_post_strategy_facets_active_full(
 			)
 
 		if plot_dir is not None:
-			out = (
-				plot_dir
-				/ f"final_top{facet_grid_active.top_n_per_optimizer}peropt_prepost_strategy_active_and_full_{cat_active.cat_label.lower()}.pdf"
+			out = plot_dir / _pdf_filename(
+				f"final_top{facet_grid_active.top_n_per_optimizer}peropt_prepost_strategy_active_and_full_{cat_active.cat_label.lower()}.pdf",
+				filename_suffix,
 			)
 			plt.savefig(out, bbox_inches="tight")
 

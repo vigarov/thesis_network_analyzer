@@ -25,6 +25,7 @@ from analysis.final.final_experiment_display import (
 	two_row_cat12_from_sorted,
 )
 from analysis.plot_helpers import add_trial_boundaries_mpl
+from analysis.final.plot_dataset_context import insert_filename_suffix
 from analysis.scoring_helpers import is_pretrain_shuffle_mislabel_experiment
 
 
@@ -1929,6 +1930,8 @@ def plot_btsp_neuron_pct_segment_trajectories(
 	show: bool = True,
 	save: bool = True,
 	figsize_per: tuple[float, float] = (5.5, 4.5),
+	filename_suffix: str = "",
+	title_suffix: str = "",
 ) -> "plt.Figure | None":
 	"""1-row × 3-col figure: shuffle / recover / reinforce.
 
@@ -2019,11 +2022,18 @@ def plot_btsp_neuron_pct_segment_trajectories(
 		title="optimizer / layer",
 	)
 
-	fig.suptitle("Cumulative % neurons with BTSP period per time segment", fontsize=13, y=1.02)
+	fig.suptitle(
+		f"Cumulative % neurons with BTSP period per time segment{title_suffix}",
+		fontsize=13,
+		y=1.02,
+	)
 	plt.tight_layout()
 	if save:
 		fig.savefig(
-			Path(plot_dir) / "additional_btsp_neuron_pct_cumulative_segments.pdf",
+			Path(plot_dir)
+			/ insert_filename_suffix(
+				"additional_btsp_neuron_pct_cumulative_segments.pdf", filename_suffix
+			),
 			bbox_inches="tight",
 		)
 	if show:
@@ -2262,6 +2272,7 @@ def plot_correlations_per_experiment(
 	corr_mat_cols: list[str],
 	corr_mat_labels: list[str],
 	show: bool = False,
+	filename_suffix: str = "",
 ) -> None:
 	if df_periods.empty:
 		return
@@ -2293,7 +2304,9 @@ def plot_correlations_per_experiment(
 			_plot_spearman_corr_matrix(ax_hm, sub, cols=corr_mat_cols, labels=corr_mat_labels)
 		fig.suptitle(f"{exp} — period metric correlations", fontsize=13, y=0.98)
 		fig.subplots_adjust(top=0.93)
-		fname = f"additional_corr_{safe_slug(exp)}.pdf"
+		fname = insert_filename_suffix(
+			f"additional_corr_{safe_slug(exp)}.pdf", filename_suffix
+		)
 		plt.savefig(Path(plot_dir) / fname, bbox_inches="tight")
 		if show:
 			plt.show()
@@ -2311,6 +2324,7 @@ def plot_correlations_pooled_by_optimizer(
 	corr_mat_cols: list[str],
 	corr_mat_labels: list[str],
 	show: bool = False,
+	filename_suffix: str = "",
 ) -> None:
 	mask = ~df_periods.apply(
 		lambda r: is_control_experiment_id(r["experiment_id"], r["experiment"], labels),
@@ -2344,7 +2358,13 @@ def plot_correlations_pooled_by_optimizer(
 		y=0.98,
 	)
 	fig.subplots_adjust(top=0.93)
-	plt.savefig(Path(plot_dir) / "additional_corr_pooled_by_optimizer_no_controls.pdf", bbox_inches="tight")
+	plt.savefig(
+		Path(plot_dir)
+		/ insert_filename_suffix(
+			"additional_corr_pooled_by_optimizer_no_controls.pdf", filename_suffix
+		),
+		bbox_inches="tight",
+	)
 	if show:
 		plt.show()
 	else:
@@ -2359,6 +2379,7 @@ def plot_correlation_matrices_pooled_by_experiment(
 	corr_mat_cols: list[str],
 	corr_mat_labels: list[str],
 	show: bool = False,
+	filename_suffix: str = "",
 ) -> None:
 	if df_periods.empty:
 		return
@@ -2382,7 +2403,11 @@ def plot_correlation_matrices_pooled_by_experiment(
 		y=1.02,
 	)
 	plt.tight_layout()
-	plt.savefig(Path(plot_dir) / "additional_corr_matrix_by_experiment.pdf", bbox_inches="tight")
+	plt.savefig(
+		Path(plot_dir)
+		/ insert_filename_suffix("additional_corr_matrix_by_experiment.pdf", filename_suffix),
+		bbox_inches="tight",
+	)
 	if show:
 		plt.show()
 	else:
@@ -2411,6 +2436,7 @@ def plot_correlation_matrix_global_pool(
 	show: bool = False,
 	category: Literal["cat1", "cat2"] | None = None,
 	exclude_controls: bool = True,
+	filename_suffix: str = "",
 ) -> None:
 	pool = df_periods.copy()
 	if category is not None:
@@ -2446,7 +2472,10 @@ def plot_correlation_matrix_global_pool(
 	_plot_spearman_corr_matrix(ax, pool, cols=corr_mat_cols, labels=corr_mat_labels)
 	fig.suptitle(title, fontsize=13, y=1.02)
 	plt.tight_layout()
-	plt.savefig(Path(plot_dir) / fname, bbox_inches="tight")
+	plt.savefig(
+		Path(plot_dir) / insert_filename_suffix(fname, filename_suffix),
+		bbox_inches="tight",
+	)
 	if show:
 		plt.show()
 	else:
@@ -2534,6 +2563,8 @@ def plot_debug_training_loss_peaks(
 	line_alpha: float = 0.2,
 	peak_marker_size: float = 22.0,
 	peak_marker_linewidth: float = 0.4,
+	filename_suffix: str = "",
+	title_suffix: str = "",
 ) -> None:
 	for eid, models in sorted(tree.items()):
 		if category_only and not is_category_experiment(eid):
@@ -2615,12 +2646,17 @@ def plot_debug_training_loss_peaks(
 					axes[0, 0].set_xlabel(x_label)
 				exp_label = rename_fn(eid)
 				# fp_label = find_peaks_params_label(fp_kw)
-				title = fr"{exp_label} ‒ training loss"# (peaks, {fp_label})"
+				title = fr"{exp_label} ‒ training loss{title_suffix}"# (peaks, {fp_label})"
 				if with_zoom:
 					title += f" (first {cat2_early_zoom_n_trials} trials below)"
 				fig.suptitle(title, y=1.01 if with_zoom else 1.02, fontsize=14)
 				fig.tight_layout()
-				fname = f"additional_debug_training_loss_peaks_{safe_slug(eid)}.pdf"
+				from analysis.final.plot_dataset_context import insert_filename_suffix
+
+				fname = insert_filename_suffix(
+					f"additional_debug_training_loss_peaks_{safe_slug(eid)}.pdf",
+					filename_suffix,
+				)
 				plt.savefig(Path(plot_dir) / fname, bbox_inches="tight")
 				if show:
 					plt.show()

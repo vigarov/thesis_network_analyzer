@@ -23,5 +23,5 @@
     "experiment_runs": 10,
     "experiment_variability": "",
     "initial_model_mode": "pretrain",
-    "use_initial_model": "pretrained_models/base/"
+    "use_initial_model": "pretrained_models/mnist/base/"
 }
