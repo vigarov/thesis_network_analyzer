@@ -14,13 +14,13 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
 	sys.path.insert(0, str(_PROJECT_ROOT))
 
-from scripts.analyse_sim_results import (
-	DEFAULT_EXPERT_MODEL_DIR_CIFAR,
-	DEFAULT_EXPERT_MODEL_DIR_MNIST,
+from analysis.final.final_analysis_config import (
 	DEFAULT_SCORE_FACTORS,
-	_parse_score_factors,
-	run_analysis,
+	EXPERT_MODEL_DIR_BY_DATASET,
+	dataset_key,
 )
+from analysis.final.load_final_analysis import run_final_analysis
+from scripts.analyse_sim_results import _parse_score_factors
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -127,16 +127,18 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
 	args = build_parser().parse_args(argv)
-	dataset = args.dataset[:5]
+	ds = dataset_key(args.dataset)
 	score_factors = args.score_factors if args.score_factors is not None else dict(DEFAULT_SCORE_FACTORS)
 	if args.expert_model_dir is None:
 		expert_model_dir = (
-			DEFAULT_EXPERT_MODEL_DIR_CIFAR if dataset == "cifar" else DEFAULT_EXPERT_MODEL_DIR_MNIST
+			EXPERT_MODEL_DIR_BY_DATASET["cifar10"]
+			if ds == "cifar"
+			else EXPERT_MODEL_DIR_BY_DATASET["mnist"]
 		)
 	else:
 		expert_model_dir = args.expert_model_dir
 
-	all_results, errors = run_analysis(
+	all_results, _tree, errors, _ds_key, _model_ids = run_final_analysis(
 		input_dir=args.input_dir,
 		output_dir=args.output_dir,
 		project_root=_PROJECT_ROOT,
@@ -150,7 +152,7 @@ def main(argv: list[str] | None = None) -> int:
 		btsp_start_strategy=args.btsp_start_strategy,
 		use_real_progression=args.use_real_progression,
 		verbose_errors=args.verbose_errors,
-		dataset=dataset,
+		dataset=args.dataset,
 		experiment_id=args.experiment_id,
 		optimizer_id=args.optimizer_id,
 	)

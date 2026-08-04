@@ -22,6 +22,7 @@ set -euo pipefail
 source scripts/slurm/common.sh
 
 ANALYSE_ARGS=(
+	--dataset mnist
 	--input-dir "${RESULTS_DIR}"
 	--output-dir "${ANALYSIS_OUTPUT_DIR}"
 )
