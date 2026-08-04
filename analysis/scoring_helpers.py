@@ -13,7 +13,6 @@ from models.unit_node_id import parse_unit_node_id
 from analysis.constants import _NETWORK_N_DIGITS, _NETWORK_SAMPLES_PER_DIGIT
 from analysis.IQA_optimization.SteerPyrComplex import SteerablePyramid
 from analysis.rdx import compute_G, distance_to_rank
-from analysis.grad_nam import grad_nam_maps_for_neuron_from_nts
 from analysis.scoring_constants import (
 	MNIST_IMAGE_SHAPE,
 	N_SAMPLES_PER_TRIAL,
@@ -2054,6 +2053,9 @@ def final_stream_grad_nam_repr_distance_through_time(
 	invert_grids: bool = False,
 ) -> pd.DataFrame:
 	"""CIFAR Grad-NAM path: cached pre-GAP conv acts + NTS DNN Jacobians at each checkpoint."""
+	# imported here to avoid circular import
+	from analysis.grad_nam import grad_nam_maps_for_neuron_from_nts
+
 	assert map_metric == "mse", "CW-SSIM is unstable with Grad-NAM maps (see local grad_cam_tests.ipynb)"
 	assert not invert_grids, "Actually, we don't want to invert the grids for the CIFAR Grad-NAM maps since we use MSE which is already well ordered"
 	device = torch.device(device) if device is not None else torch.device(

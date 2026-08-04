@@ -184,19 +184,26 @@ def grad_nam_maps_for_neuron_from_nts(
 	unit_idx = parsed["unit_index"]
 
 	weights, activations = dnn_tensors_from_nts(nts, checkpoint_idx, device=device)
-	with torch.no_grad():
-		jacobian = custom_saliency_map(weights, activations)
-	row = jacobian[layer_idx, unit_idx].detach().cpu().numpy()
+	#        activations: (n_layers, n_neurons, n_samples)
+	n_samples = int(activations.shape[-1])
+	if conv_acts.shape[0] != n_samples:
+		raise ValueError(
+			f"conv_acts size {conv_acts.shape[0]} != NTS activation samples {n_samples}"
+		)
 
 	maps: list[np.ndarray] = []
-	for sample_idx in range(conv_acts.shape[0]):
-		maps.append(
-			grad_nam_from_tensors(
-				conv_acts[sample_idx],
-				row,
-				target_size=target_size,
+	with torch.no_grad():
+		for sample_idx in range(n_samples):
+			sample_activations = activations[:, :, sample_idx]
+			jacobian = custom_saliency_map(weights, sample_activations)
+			row = jacobian[layer_idx, unit_idx].detach().cpu().numpy()
+			maps.append(
+				grad_nam_from_tensors(
+					conv_acts[sample_idx],
+					row,
+					target_size=target_size,
+				)
 			)
-		)
 	return maps
 
 
