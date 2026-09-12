@@ -16,3 +16,4 @@ torch>=2.12.1
 torchvision>=0.27.1
 torch-shampoo>=1.0.0
 jupyter>=1.1.1
+opencv-python>=5.0.0.93

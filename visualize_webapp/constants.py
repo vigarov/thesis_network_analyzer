@@ -6,7 +6,7 @@ _PROJECT = _APP_DIR.parent
 RESULTS = _PROJECT / "results"
 
 if str(_PROJECT) not in sys.path:
-	sys.path.insert(0, str(_PROJECT))
+    sys.path.insert(0, str(_PROJECT))
 
 # Eval batch for MNIST-style experiments: 10 digits × 5 samples (see experiments/mnist/base.py).
 _NETWORK_N_DIGITS = 10

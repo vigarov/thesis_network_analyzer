@@ -21,10 +21,8 @@ from models import AnalyzableModel
 from models.unit_node_id import parse_unit_node_id, format_unit_node_id
 
 
-# ---------------------------------------------------------------------------
 # Guided-backprop ReLU
 # Adapted from github.com/jacobgil/pytorch-grad-cam/blob/master/pytorch_grad_cam/guided_backprop.py
-# ---------------------------------------------------------------------------
 
 class _GBPReLU(Function):
     @staticmethod
@@ -51,9 +49,7 @@ def _replace_layers(module, src_type, make_replacement):
             _replace_layers(child, src_type, make_replacement)
 
 
-# ---------------------------------------------------------------------------
 # Effective receptive field computation
-# ---------------------------------------------------------------------------
 
 def get_neuron_effective_receptive_field(
     model: AnalyzableModel, neuron_id, eval_digits, device, use_gbp: bool = False
@@ -119,7 +115,7 @@ def get_all_prev_layer_neuron_erfs(
     use_gbp: bool = False,
 ):
     """Compute input gradients for ALL neurons in the layer immediately before
-    ``target_neuron_id``.
+    `target_neuron_id`.
 
     Returns:
         dict[str, list[Tensor]]:
@@ -197,12 +193,10 @@ def weighted_sum_gradients(all_prev_grads, w_cp):
     return out
 
 
-# ---------------------------------------------------------------------------
 # Visualization helpers
-# ---------------------------------------------------------------------------
 
 def gaussian_from_grad(matrix: np.ndarray | Tensor) -> np.ndarray:
-    """Fit a 2D Gaussian to ``matrix`` (weighted by absolute values) and return
+    """Fit a 2D Gaussian to `matrix` (weighted by absolute values) and return
     the evaluated density on the same grid, scaled to preserve total weight."""
     matrix = matrix if isinstance(matrix, np.ndarray) else matrix.cpu().numpy()
     matrix = np.abs(matrix)

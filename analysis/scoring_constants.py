@@ -13,10 +13,10 @@ MNIST_IMAGE_SHAPE = (28, 28)
 
 # Maps optimizer id prefix (before `_lr`) to registry class name for expert extraction.
 OPTIMIZER_PREFIX_TO_REGISTRY_CLASS = {
-	"sgd": "SGDExtractor",
-	"adam": "AdamExtractor",
-	"adagrad": "AdaGradExtractor",
-	"pure_shampoo": "PureShampooExtractor",
-	"grafted_shampoo": "GraftedShampooExtractor",
-	"graft_shampoo": "GraftedShampooExtractor",
+    "sgd": "SGDExtractor",
+    "adam": "AdamExtractor",
+    "adagrad": "AdaGradExtractor",
+    "pure_shampoo": "PureShampooExtractor",
+    "grafted_shampoo": "GraftedShampooExtractor",
+    "graft_shampoo": "GraftedShampooExtractor",
 }

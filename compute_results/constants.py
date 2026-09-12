@@ -1,15 +1,15 @@
 # Keys omitted from the training fingerprint and from training-config equality checks.
 # `framework_version` is ignored if present in an old config.json on disk.
 FINGERPRINT_EXCLUDE_KEYS = frozenset(
-	{
-		"internal_keep_tensors",
-		"device",
-		"save_model_cp",
-		"save_model",
-		"force",
-		"training_config_fingerprint",
-		"framework_version",
-	}
+    {
+        "internal_keep_tensors",
+        "device",
+        "save_model_cp",
+        "save_model",
+        "force",
+        "training_config_fingerprint",
+        "framework_version",
+    }
 )
 
 # placeholder expanded to all available optimizers/experiments (depending on context)
@@ -21,11 +21,11 @@ DEFAULT_DATASET = "mnist"
 # Human-friendly optimizer CLI names -> registry extractor class name.
 # Kept in sync with `OPTIMIZER_SHORTHAND` in `run_simulation` (derived from this dict).
 INITIAL_MODEL_OPTIMIZER_SHORTHAND_TO_CLASS: dict[str, str] = {
-	"sgd": "SGDExtractor",
-	"adam": "AdamExtractor",
-	"adagrad": "AdaGradExtractor",
-	"pure_shampoo": "PureShampooExtractor",
-	"grafted_shampoo": "GraftedShampooExtractor",
+    "sgd": "SGDExtractor",
+    "adam": "AdamExtractor",
+    "adagrad": "AdaGradExtractor",
+    "pure_shampoo": "PureShampooExtractor",
+    "grafted_shampoo": "GraftedShampooExtractor",
 }
 
 # Checkpoint filename inside each `use_initial_model` bundle subfolder (try first match).
@@ -43,21 +43,21 @@ DEFAULT_MULTI_LRS: list[float] = [1e-3, 3e-3, 1e-2, 3e-2, 1e-1]
 
 # Keys omitted from pretrain config fingerprint and equality checks.
 PRETRAIN_FINGERPRINT_EXCLUDE_KEYS = frozenset(
-	{
-		"device",
-		"save",
-		"force",
-		"out_dir",
-		"pretrain_config_fingerprint",
-	}
+    {
+        "device",
+        "save",
+        "force",
+        "out_dir",
+        "pretrain_config_fingerprint",
+    }
 )
 
 # Pretrain fields that match to skip re-training
 PRETRAIN_REUSE_KEYS: tuple[str, ...] = (
-	"base_lr",
-	"train_k_samples",
-	"model_class",
-	"dataset",
+    "base_lr",
+    "train_k_samples",
+    "model_class",
+    "dataset",
 )
 
 # Sentinel for argparse: bare `--multi_seeds` (no CSV value).

@@ -6,12 +6,12 @@ script per shard under `--scripts-dir`, and optionally `sbatch`s each script.
 
 Usage
 -----
-	uv run python scripts/slurm/submit_analyse_jobs.py \\
-		--env-file .env
+    uv run python scripts/slurm/submit_analyse_jobs.py \\
+        --env-file .env
 
 Preview generated scripts without submitting:
 
-	uv run python scripts/slurm/submit_analyse_jobs.py --dry-run
+    uv run python scripts/slurm/submit_analyse_jobs.py --dry-run
 
 After submitting, waits for all shard jobs (`squeue` / `sacct`) and min-max
 normalizes robustness across all cached checkpoints via
@@ -31,7 +31,7 @@ from dotenv import dotenv_values
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
-	sys.path.insert(0, str(_PROJECT_ROOT))
+    sys.path.insert(0, str(_PROJECT_ROOT))
 
 from analysis.dataset_filter import prepare_results_tree
 from analysis.constants import set_results_root
@@ -60,11 +60,11 @@ source scripts/slurm/common.sh
 echo "analyse_one eid={eid_quoted} oid={oid_quoted} runs={n_runs}"
 
 ANALYSE_ARGS=(
-	python scripts/slurm/analyse_one.py
-	--experiment-id {eid_quoted}
-	--optimizer-id {oid_quoted}
-	--input-dir "${{RESULTS_DIR}}"
-	--output-dir "${{ANALYSIS_OUTPUT_DIR}}"
+    python scripts/slurm/analyse_one.py
+    --experiment-id {eid_quoted}
+    --optimizer-id {oid_quoted}
+    --input-dir "${{RESULTS_DIR}}"
+    --output-dir "${{ANALYSIS_OUTPUT_DIR}}"
 )
 {extra_analyse_args}
 
@@ -74,524 +74,524 @@ run_uv "${{ANALYSE_ARGS[@]}}"
 
 @dataclass(frozen=True)
 class ExperimentOptimizerJob:
-	eid: str
-	oid: str
-	runs: tuple[tuple[str, str], ...]
+    eid: str
+    oid: str
+    runs: tuple[tuple[str, str], ...]
 
-	@property
-	def n_runs(self) -> int:
-		return len(self.runs)
+    @property
+    def n_runs(self) -> int:
+        return len(self.runs)
 
 
 def _load_env(env_file: Path) -> dict[str, str]:
-	if not env_file.is_file():
-		raise FileNotFoundError(f"env file not found: {env_file}")
-	raw = dotenv_values(env_file)
-	out: dict[str, str] = {}
-	for key, value in raw.items():
-		if value is None:
-			continue
-		out[key] = os.path.expandvars(str(value))
-	return out
+    if not env_file.is_file():
+        raise FileNotFoundError(f"env file not found: {env_file}")
+    raw = dotenv_values(env_file)
+    out: dict[str, str] = {}
+    for key, value in raw.items():
+        if value is None:
+            continue
+        out[key] = os.path.expandvars(str(value))
+    return out
 
 
 def _require_env(env: dict[str, str], key: str) -> str:
-	value = env.get(key, "").strip()
-	if not value:
-		raise ValueError(f"{key} is unset in env file")
-	return value
+    value = env.get(key, "").strip()
+    if not value:
+        raise ValueError(f"{key} is unset in env file")
+    return value
 
 
 def _bash_quote(value: str) -> str:
-	return "'" + value.replace("'", "'\"'\"'") + "'"
+    return "'" + value.replace("'", "'\"'\"'") + "'"
 
 
 def _job_slug(eid: str, oid: str) -> str:
-	digest = hashlib.sha256(f"{eid}|{oid}".encode("utf-8")).hexdigest()[:10]
-	eid_part = re.sub(r"[^A-Za-z0-9._-]+", "_", eid)[:24].strip("_")
-	oid_part = re.sub(r"[^A-Za-z0-9._-]+", "_", oid)[:24].strip("_")
-	return f"{eid_part}__{oid_part}__{digest}"
+    digest = hashlib.sha256(f"{eid}|{oid}".encode("utf-8")).hexdigest()[:10]
+    eid_part = re.sub(r"[^A-Za-z0-9._-]+", "_", eid)[:24].strip("_")
+    oid_part = re.sub(r"[^A-Za-z0-9._-]+", "_", oid)[:24].strip("_")
+    return f"{eid_part}__{oid_part}__{digest}"
 
 
 def _slurm_job_name(eid: str, oid: str) -> str:
-	"""Slurm job names are limited to 64 characters."""
-	base = f"net-a-{_job_slug(eid, oid)}"
-	return base[:64]
+    """Slurm job names are limited to 64 characters."""
+    base = f"net-a-{_job_slug(eid, oid)}"
+    return base[:64]
 
 
 def collect_experiment_optimizer_jobs(
-	results_dir: Path,
-	*,
-	dataset: str = "mnist",
+    results_dir: Path,
+    *,
+    dataset: str = "mnist",
 ) -> tuple[list[ExperimentOptimizerJob], list[str]]:
-	"""Return sorted shard jobs from the on-disk results tree."""
-	set_results_root(results_dir)
-	tree = scan_results(refresh=True, w_cache=False)
-	tree, skipped = prepare_results_tree(tree, dataset)
+    """Return sorted shard jobs from the on-disk results tree."""
+    set_results_root(results_dir)
+    tree = scan_results(refresh=True, w_cache=False)
+    tree, skipped = prepare_results_tree(tree, dataset)
 
-	pairs: dict[tuple[str, str], set[tuple[str, str]]] = {}
-	for eid, models in tree.items():
-		for mid, runs in models.items():
-			for rid, oids in runs.items():
-				for oid in oids:
-					pairs.setdefault((eid, oid), set()).add((mid, rid))
+    pairs: dict[tuple[str, str], set[tuple[str, str]]] = {}
+    for eid, models in tree.items():
+        for mid, runs in models.items():
+            for rid, oids in runs.items():
+                for oid in oids:
+                    pairs.setdefault((eid, oid), set()).add((mid, rid))
 
-	jobs: list[ExperimentOptimizerJob] = []
-	for (eid, oid), run_set in sorted(pairs.items()):
-		jobs.append(
-			ExperimentOptimizerJob(
-				eid=eid,
-				oid=oid,
-				runs=tuple(sorted(run_set)),
-			)
-		)
-	return jobs, skipped
+    jobs: list[ExperimentOptimizerJob] = []
+    for (eid, oid), run_set in sorted(pairs.items()):
+        jobs.append(
+            ExperimentOptimizerJob(
+                eid=eid,
+                oid=oid,
+                runs=tuple(sorted(run_set)),
+            )
+        )
+    return jobs, skipped
 
 
 def _shard_complete(
-	job: ExperimentOptimizerJob,
-	analysis_output_dir: Path,
+    job: ExperimentOptimizerJob,
+    analysis_output_dir: Path,
 ) -> bool:
-	for mid, rid in job.runs:
-		if _load_run_checkpoint(str(analysis_output_dir), job.eid, mid, job.oid, rid) is None:
-			return False
-	return True
+    for mid, rid in job.runs:
+        if _load_run_checkpoint(str(analysis_output_dir), job.eid, mid, job.oid, rid) is None:
+            return False
+    return True
 
 
 def _format_extra_analyse_args(args: argparse.Namespace) -> tuple[str, list[str]]:
-	lines: list[str] = []
-	cli_args: list[str] = []
+    lines: list[str] = []
+    cli_args: list[str] = []
 
-	if args.expert_model_dir is not None:
-		quoted = _bash_quote(args.expert_model_dir)
-		lines.append(f'ANALYSE_ARGS+=(--expert-model-dir {quoted})')
-		cli_args.extend(["--expert-model-dir", args.expert_model_dir])
+    if args.expert_model_dir is not None:
+        quoted = _bash_quote(args.expert_model_dir)
+        lines.append(f'ANALYSE_ARGS+=(--expert-model-dir {quoted})')
+        cli_args.extend(["--expert-model-dir", args.expert_model_dir])
 
-	dataset = args.dataset[:5]
-	if dataset != "mnist":
-		quoted = _bash_quote(dataset)
-		lines.append(f"ANALYSE_ARGS+=(--dataset {quoted})")
-		cli_args.extend(["--dataset", dataset])
+    dataset = args.dataset[:5]
+    if dataset != "mnist":
+        quoted = _bash_quote(dataset)
+        lines.append(f"ANALYSE_ARGS+=(--dataset {quoted})")
+        cli_args.extend(["--dataset", dataset])
 
-	if args.n_checkpoint_samples != 20:
-		lines.append(f"ANALYSE_ARGS+=(--n-checkpoint-samples {args.n_checkpoint_samples})")
-		cli_args.extend(["--n-checkpoint-samples", str(args.n_checkpoint_samples)])
+    if args.n_checkpoint_samples != 20:
+        lines.append(f"ANALYSE_ARGS+=(--n-checkpoint-samples {args.n_checkpoint_samples})")
+        cli_args.extend(["--n-checkpoint-samples", str(args.n_checkpoint_samples)])
 
-	if args.score_factors is not None:
-		quoted = _bash_quote(args.score_factors)
-		lines.append(f"ANALYSE_ARGS+=(--score-factors {quoted})")
-		cli_args.extend(["--score-factors", args.score_factors])
+    if args.score_factors is not None:
+        quoted = _bash_quote(args.score_factors)
+        lines.append(f"ANALYSE_ARGS+=(--score-factors {quoted})")
+        cli_args.extend(["--score-factors", args.score_factors])
 
-	for flag, enabled in (
-		("rescore", args.rescore),
-		("reparse-digit-a", args.reparse_digit_a),
-		("strict", args.strict),
-		("use-real-progression", args.use_real_progression),
-		("verbose-errors", args.verbose_errors),
-	):
-		token = f"--{flag}" if enabled else f"--no-{flag}"
-		lines.append(f"ANALYSE_ARGS+=({token})")
-		cli_args.append(token)
+    for flag, enabled in (
+        ("rescore", args.rescore),
+        ("reparse-digit-a", args.reparse_digit_a),
+        ("strict", args.strict),
+        ("use-real-progression", args.use_real_progression),
+        ("verbose-errors", args.verbose_errors),
+    ):
+        token = f"--{flag}" if enabled else f"--no-{flag}"
+        lines.append(f"ANALYSE_ARGS+=({token})")
+        cli_args.append(token)
 
-	if args.btsp_start_strategy != "acceleration":
-		lines.append(f"ANALYSE_ARGS+=(--btsp-start-strategy {_bash_quote(args.btsp_start_strategy)})")
-		cli_args.extend(["--btsp-start-strategy", args.btsp_start_strategy])
+    if args.btsp_start_strategy != "acceleration":
+        lines.append(f"ANALYSE_ARGS+=(--btsp-start-strategy {_bash_quote(args.btsp_start_strategy)})")
+        cli_args.extend(["--btsp-start-strategy", args.btsp_start_strategy])
 
-	return "\n".join(lines), cli_args
+    return "\n".join(lines), cli_args
 
 
 def _partition_line(partition: str | None) -> str:
-	if not partition:
-		return ""
-	return f"#SBATCH --partition={partition}"
+    if not partition:
+        return ""
+    return f"#SBATCH --partition={partition}"
 
 
 def render_slurm_script(
-	job: ExperimentOptimizerJob,
-	*,
-	time: str,
-	gpus: int,
-	cpus_per_task: int,
-	mem: str,
-	partition: str | None,
-	extra_analyse_args: str,
+    job: ExperimentOptimizerJob,
+    *,
+    time: str,
+    gpus: int,
+    cpus_per_task: int,
+    mem: str,
+    partition: str | None,
+    extra_analyse_args: str,
 ) -> str:
-	return _SLURM_TEMPLATE.format(
-		eid=job.eid,
-		oid=job.oid,
-		n_runs=job.n_runs,
-		job_name=_slurm_job_name(job.eid, job.oid),
-		time=time,
-		gpus=gpus,
-		cpus_per_task=cpus_per_task,
-		mem=mem,
-		partition_line=_partition_line(partition),
-		eid_quoted=_bash_quote(job.eid),
-		oid_quoted=_bash_quote(job.oid),
-		extra_analyse_args=extra_analyse_args,
-	)
+    return _SLURM_TEMPLATE.format(
+        eid=job.eid,
+        oid=job.oid,
+        n_runs=job.n_runs,
+        job_name=_slurm_job_name(job.eid, job.oid),
+        time=time,
+        gpus=gpus,
+        cpus_per_task=cpus_per_task,
+        mem=mem,
+        partition_line=_partition_line(partition),
+        eid_quoted=_bash_quote(job.eid),
+        oid_quoted=_bash_quote(job.oid),
+        extra_analyse_args=extra_analyse_args,
+    )
 
 
 def write_job_script(
-	job: ExperimentOptimizerJob,
-	scripts_dir: Path,
-	*,
-	time: str,
-	gpus: int,
-	cpus_per_task: int,
-	mem: str,
-	partition: str | None,
-	extra_analyse_args: str,
+    job: ExperimentOptimizerJob,
+    scripts_dir: Path,
+    *,
+    time: str,
+    gpus: int,
+    cpus_per_task: int,
+    mem: str,
+    partition: str | None,
+    extra_analyse_args: str,
 ) -> Path:
-	scripts_dir.mkdir(parents=True, exist_ok=True)
-	script_path = scripts_dir / f"analyse_{_job_slug(job.eid, job.oid)}.sh"
-	content = render_slurm_script(
-		job,
-		time=time,
-		gpus=gpus,
-		cpus_per_task=cpus_per_task,
-		mem=mem,
-		partition=partition,
-		extra_analyse_args=extra_analyse_args,
-	)
-	script_path.write_text(content, encoding="utf-8")
-	script_path.chmod(0o755)
-	return script_path
+    scripts_dir.mkdir(parents=True, exist_ok=True)
+    script_path = scripts_dir / f"analyse_{_job_slug(job.eid, job.oid)}.sh"
+    content = render_slurm_script(
+        job,
+        time=time,
+        gpus=gpus,
+        cpus_per_task=cpus_per_task,
+        mem=mem,
+        partition=partition,
+        extra_analyse_args=extra_analyse_args,
+    )
+    script_path.write_text(content, encoding="utf-8")
+    script_path.chmod(0o755)
+    return script_path
 
 
 def submit_job(
-	script_path: Path,
-	*,
-	project_root: Path,
-	slurm_account: str,
-	slurm_log_dir: Path,
-	job_name: str,
+    script_path: Path,
+    *,
+    project_root: Path,
+    slurm_account: str,
+    slurm_log_dir: Path,
+    job_name: str,
 ) -> str:
-	slurm_log_dir.mkdir(parents=True, exist_ok=True)
-	out_path = slurm_log_dir / f"{job_name}_%j.out"
-	err_path = slurm_log_dir / f"{job_name}_%j.err"
-	proc = subprocess.run(
-		[
-			"sbatch",
-			"--parsable",
-			f"--account={slurm_account}",
-			f"--chdir={project_root}",
-			f"--output={out_path}",
-			f"--error={err_path}",
-			str(script_path),
-		],
-		check=True,
-		capture_output=True,
-		text=True,
-	)
-	return proc.stdout.strip().split(";")[0]
+    slurm_log_dir.mkdir(parents=True, exist_ok=True)
+    out_path = slurm_log_dir / f"{job_name}_%j.out"
+    err_path = slurm_log_dir / f"{job_name}_%j.err"
+    proc = subprocess.run(
+        [
+            "sbatch",
+            "--parsable",
+            f"--account={slurm_account}",
+            f"--chdir={project_root}",
+            f"--output={out_path}",
+            f"--error={err_path}",
+            str(script_path),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return proc.stdout.strip().split(";")[0]
 
 
 def _sacct_failed_states(job_id: str) -> list[str]:
-	proc = subprocess.run(
-		["sacct", "-j", job_id, "-X", "--format=State", "-n"],
-		capture_output=True,
-		text=True,
-		check=False,
-	)
-	failed: list[str] = []
-	for line in proc.stdout.splitlines():
-		state = line.strip()
-		if not state or state in ("COMPLETED", "COMPLETING"):
-			continue
-		failed.append(state)
-	return failed
+    proc = subprocess.run(
+        ["sacct", "-j", job_id, "-X", "--format=State", "-n"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    failed: list[str] = []
+    for line in proc.stdout.splitlines():
+        state = line.strip()
+        if not state or state in ("COMPLETED", "COMPLETING"):
+            continue
+        failed.append(state)
+    return failed
 
 
 def wait_for_slurm_jobs(job_ids: list[str], *, poll_interval: int = 5) -> None:
-	"""Wait until every job leaves the queue, then verify success via sacct."""
-	if not job_ids:
-		return
+    """Wait until every job leaves the queue, then verify success via sacct."""
+    if not job_ids:
+        return
 
-	job_list = ",".join(job_ids)
-	print(f"Waiting for {len(job_ids)} Slurm job(s): {job_list}")
-	while True:
-		proc = subprocess.run(
-			["squeue", "-h", "-j", job_list],
-			capture_output=True,
-			text=True,
-			check=False,
-		)
-		if not proc.stdout.strip():
-			break
-		time.sleep(poll_interval)
+    job_list = ",".join(job_ids)
+    print(f"Waiting for {len(job_ids)} Slurm job(s): {job_list}")
+    while True:
+        proc = subprocess.run(
+            ["squeue", "-h", "-j", job_list],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if not proc.stdout.strip():
+            break
+        time.sleep(poll_interval)
 
-	failures: list[str] = []
-	for job_id in job_ids:
-		bad_states = _sacct_failed_states(job_id)
-		if bad_states:
-			failures.append(job_id)
-			print(f"ERROR: job {job_id} did not complete successfully:", file=sys.stderr)
-			subprocess.run(
-				["sacct", "-j", job_id, "-X", "--format=JobID,State,ExitCode", "-n"],
-				check=False,
-			)
-	if failures:
-		raise RuntimeError(
-			f"{len(failures)} Slurm job(s) failed: {', '.join(failures)}"
-		)
+    failures: list[str] = []
+    for job_id in job_ids:
+        bad_states = _sacct_failed_states(job_id)
+        if bad_states:
+            failures.append(job_id)
+            print(f"ERROR: job {job_id} did not complete successfully:", file=sys.stderr)
+            subprocess.run(
+                ["sacct", "-j", job_id, "-X", "--format=JobID,State,ExitCode", "-n"],
+                check=False,
+            )
+    if failures:
+        raise RuntimeError(
+            f"{len(failures)} Slurm job(s) failed: {', '.join(failures)}"
+        )
 
-	print(f"All {len(job_ids)} Slurm job(s) completed successfully.")
+    print(f"All {len(job_ids)} Slurm job(s) completed successfully.")
 
 
 def build_parser() -> argparse.ArgumentParser:
-	p = argparse.ArgumentParser(description=__doc__)
-	p.add_argument(
-		"--env-file",
-		type=Path,
-		default=_PROJECT_ROOT / ".env",
-		help="Dotenv file with PROJECT_ROOT, RESULTS_DIR, ANALYSIS_OUTPUT_DIR, SLURM_*.",
-	)
-	p.add_argument(
-		"--results-dir",
-		type=Path,
-		default=None,
-		help="Override RESULTS_DIR from the env file.",
-	)
-	p.add_argument(
-		"--analysis-output-dir",
-		type=Path,
-		default=None,
-		help="Override ANALYSIS_OUTPUT_DIR from the env file.",
-	)
-	p.add_argument(
-		"--scripts-dir",
-		type=Path,
-		default=_DEFAULT_SCRIPTS_DIR,
-		help=f"Directory for generated bash scripts (default: {_DEFAULT_SCRIPTS_DIR}).",
-	)
-	p.add_argument(
-		"--dry-run",
-		action="store_true",
-		help="Write bash scripts only; do not call sbatch.",
-	)
-	p.add_argument(
-		"--no-wait-minmax",
-		action="store_true",
-		help="Submit shard jobs and exit without waiting or min-max normalization.",
-	)
-	p.add_argument(
-		"--skip-complete",
-		action="store_true",
-		help="Skip shards whose analysis checkpoints already exist for every run.",
-	)
-	p.add_argument(
-		"--time",
-		default="01:30:00",
-		help="Slurm --time for each shard job (default: 01:30:00).",
-	)
-	p.add_argument(
-		"--gpus",
-		type=int,
-		default=1,
-		help="Slurm --gpus per shard job (default: 1).",
-	)
-	p.add_argument(
-		"--cpus-per-task",
-		type=int,
-		default=16,
-		help="Slurm --cpus-per-task per shard job (default: 16).",
-	)
-	p.add_argument(
-		"--mem",
-		default="16G",
-		help="Slurm --mem per shard job (default: 16G).",
-	)
-	p.add_argument(
-		"--partition",
-		default=None,
-		help=(
-			"Slurm --partition for each shard job "
-			"(comma-separated list allowed, e.g. gpu_a100_40gb,gpu_v100_32gb)."
-		),
-	)
-	p.add_argument(
-		"--dataset",
-		default="mnist",
-		help="Dataset family (default: mnist). Accepts cifar / cifar10.",
-	)
-	p.add_argument(
-		"--expert-model-dir",
-		type=str,
-		default=None,
-		help="Forwarded to analyse_one.py (default: dataset-specific).",
-	)
-	p.add_argument(
-		"--n-checkpoint-samples",
-		type=int,
-		default=20,
-		help="Forwarded to analyse_one.py.",
-	)
-	p.add_argument(
-		"--score-factors",
-		type=str,
-		default=None,
-		help="Forwarded to analyse_one.py as JSON.",
-	)
-	p.add_argument(
-		"--rescore",
-		action=argparse.BooleanOptionalAction,
-		default=True,
-		help="Forwarded to analyse_one.py.",
-	)
-	p.add_argument(
-		"--reparse-digit-a",
-		action=argparse.BooleanOptionalAction,
-		default=False,
-		help="Forwarded to analyse_one.py.",
-	)
-	p.add_argument(
-		"--strict",
-		action=argparse.BooleanOptionalAction,
-		default=False,
-		help="Forwarded to analyse_one.py.",
-	)
-	p.add_argument(
-		"--btsp-start-strategy",
-		type=str,
-		default="acceleration",
-		choices=("acceleration", "trial_start"),
-		help="Forwarded to analyse_one.py.",
-	)
-	p.add_argument(
-		"--use-real-progression",
-		action=argparse.BooleanOptionalAction,
-		default=True,
-		help="Forwarded to analyse_one.py.",
-	)
-	p.add_argument(
-		"--verbose-errors",
-		action=argparse.BooleanOptionalAction,
-		default=True,
-		help="Forwarded to analyse_one.py.",
-	)
-	return p
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument(
+        "--env-file",
+        type=Path,
+        default=_PROJECT_ROOT / ".env",
+        help="Dotenv file with PROJECT_ROOT, RESULTS_DIR, ANALYSIS_OUTPUT_DIR, SLURM_*.",
+    )
+    p.add_argument(
+        "--results-dir",
+        type=Path,
+        default=None,
+        help="Override RESULTS_DIR from the env file.",
+    )
+    p.add_argument(
+        "--analysis-output-dir",
+        type=Path,
+        default=None,
+        help="Override ANALYSIS_OUTPUT_DIR from the env file.",
+    )
+    p.add_argument(
+        "--scripts-dir",
+        type=Path,
+        default=_DEFAULT_SCRIPTS_DIR,
+        help=f"Directory for generated bash scripts (default: {_DEFAULT_SCRIPTS_DIR}).",
+    )
+    p.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Write bash scripts only; do not call sbatch.",
+    )
+    p.add_argument(
+        "--no-wait-minmax",
+        action="store_true",
+        help="Submit shard jobs and exit without waiting or min-max normalization.",
+    )
+    p.add_argument(
+        "--skip-complete",
+        action="store_true",
+        help="Skip shards whose analysis checkpoints already exist for every run.",
+    )
+    p.add_argument(
+        "--time",
+        default="01:30:00",
+        help="Slurm --time for each shard job (default: 01:30:00).",
+    )
+    p.add_argument(
+        "--gpus",
+        type=int,
+        default=1,
+        help="Slurm --gpus per shard job (default: 1).",
+    )
+    p.add_argument(
+        "--cpus-per-task",
+        type=int,
+        default=16,
+        help="Slurm --cpus-per-task per shard job (default: 16).",
+    )
+    p.add_argument(
+        "--mem",
+        default="16G",
+        help="Slurm --mem per shard job (default: 16G).",
+    )
+    p.add_argument(
+        "--partition",
+        default=None,
+        help=(
+            "Slurm --partition for each shard job "
+            "(comma-separated list allowed, e.g. gpu_a100_40gb,gpu_v100_32gb)."
+        ),
+    )
+    p.add_argument(
+        "--dataset",
+        default="mnist",
+        help="Dataset family (default: mnist). Accepts cifar / cifar10.",
+    )
+    p.add_argument(
+        "--expert-model-dir",
+        type=str,
+        default=None,
+        help="Forwarded to analyse_one.py (default: dataset-specific).",
+    )
+    p.add_argument(
+        "--n-checkpoint-samples",
+        type=int,
+        default=20,
+        help="Forwarded to analyse_one.py.",
+    )
+    p.add_argument(
+        "--score-factors",
+        type=str,
+        default=None,
+        help="Forwarded to analyse_one.py as JSON.",
+    )
+    p.add_argument(
+        "--rescore",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Forwarded to analyse_one.py.",
+    )
+    p.add_argument(
+        "--reparse-digit-a",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Forwarded to analyse_one.py.",
+    )
+    p.add_argument(
+        "--strict",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Forwarded to analyse_one.py.",
+    )
+    p.add_argument(
+        "--btsp-start-strategy",
+        type=str,
+        default="acceleration",
+        choices=("acceleration", "trial_start"),
+        help="Forwarded to analyse_one.py.",
+    )
+    p.add_argument(
+        "--use-real-progression",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Forwarded to analyse_one.py.",
+    )
+    p.add_argument(
+        "--verbose-errors",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Forwarded to analyse_one.py.",
+    )
+    return p
 
 
 def main(argv: list[str] | None = None) -> int:
-	args = build_parser().parse_args(argv)
+    args = build_parser().parse_args(argv)
 
-	env_file = args.env_file.expanduser()
-	env = _load_env(env_file)
-	project_root = Path(_require_env(env, "PROJECT_ROOT")).expanduser().resolve()
-	results_dir = (
-		args.results_dir.expanduser().resolve()
-		if args.results_dir is not None
-		else Path(_require_env(env, "RESULTS_DIR")).expanduser().resolve()
-	)
-	analysis_output_dir = (
-		args.analysis_output_dir.expanduser().resolve()
-		if args.analysis_output_dir is not None
-		else Path(_require_env(env, "ANALYSIS_OUTPUT_DIR")).expanduser().resolve()
-	)
-	slurm_account = env.get("SLURM_ACCOUNT", "").strip()
-	slurm_log_dir_raw = env.get("SLURM_LOG_DIR", "").strip()
-	if not args.dry_run:
-		if not slurm_account:
-			raise ValueError("SLURM_ACCOUNT is unset in env file")
-		if not slurm_log_dir_raw:
-			raise ValueError("SLURM_LOG_DIR is unset in env file")
-	slurm_log_dir = Path(slurm_log_dir_raw or "/tmp").expanduser().resolve()
+    env_file = args.env_file.expanduser()
+    env = _load_env(env_file)
+    project_root = Path(_require_env(env, "PROJECT_ROOT")).expanduser().resolve()
+    results_dir = (
+        args.results_dir.expanduser().resolve()
+        if args.results_dir is not None
+        else Path(_require_env(env, "RESULTS_DIR")).expanduser().resolve()
+    )
+    analysis_output_dir = (
+        args.analysis_output_dir.expanduser().resolve()
+        if args.analysis_output_dir is not None
+        else Path(_require_env(env, "ANALYSIS_OUTPUT_DIR")).expanduser().resolve()
+    )
+    slurm_account = env.get("SLURM_ACCOUNT", "").strip()
+    slurm_log_dir_raw = env.get("SLURM_LOG_DIR", "").strip()
+    if not args.dry_run:
+        if not slurm_account:
+            raise ValueError("SLURM_ACCOUNT is unset in env file")
+        if not slurm_log_dir_raw:
+            raise ValueError("SLURM_LOG_DIR is unset in env file")
+    slurm_log_dir = Path(slurm_log_dir_raw or "/tmp").expanduser().resolve()
 
-	if not results_dir.is_dir():
-		print(f"ERROR: results dir not found: {results_dir}", file=sys.stderr)
-		return 1
+    if not results_dir.is_dir():
+        print(f"ERROR: results dir not found: {results_dir}", file=sys.stderr)
+        return 1
 
-	jobs, skipped = collect_experiment_optimizer_jobs(results_dir, dataset=args.dataset[:5])
-	for msg in skipped:
-		print(f"Skipping CIFAR experiment: {msg}")
-	if not jobs:
-		print(f"No completed optimizer runs found under {results_dir}", file=sys.stderr)
-		return 1
+    jobs, skipped = collect_experiment_optimizer_jobs(results_dir, dataset=args.dataset[:5])
+    for msg in skipped:
+        print(f"Skipping CIFAR experiment: {msg}")
+    if not jobs:
+        print(f"No completed optimizer runs found under {results_dir}", file=sys.stderr)
+        return 1
 
-	extra_analyse_args, _ = _format_extra_analyse_args(args)
-	scripts_dir = args.scripts_dir.expanduser().resolve()
+    extra_analyse_args, _ = _format_extra_analyse_args(args)
+    scripts_dir = args.scripts_dir.expanduser().resolve()
 
-	selected: list[ExperimentOptimizerJob] = []
-	skipped_complete = 0
-	for job in jobs:
-		if args.skip_complete and _shard_complete(job, analysis_output_dir):
-			skipped_complete += 1
-			continue
-		selected.append(job)
+    selected: list[ExperimentOptimizerJob] = []
+    skipped_complete = 0
+    for job in jobs:
+        if args.skip_complete and _shard_complete(job, analysis_output_dir):
+            skipped_complete += 1
+            continue
+        selected.append(job)
 
-	print(
-		f"Discovered {len(jobs)} shard(s) under {results_dir}; "
-		f"selected {len(selected)}; skipped {skipped_complete} complete"
-	)
+    print(
+        f"Discovered {len(jobs)} shard(s) under {results_dir}; "
+        f"selected {len(selected)}; skipped {skipped_complete} complete"
+    )
 
-	if not selected:
-		print("Nothing to submit.")
-		return 0
+    if not selected:
+        print("Nothing to submit.")
+        return 0
 
-	submitted: list[tuple[str, Path, str]] = []
-	for job in selected:
-		script_path = write_job_script(
-			job,
-			scripts_dir,
-			time=args.time,
-			gpus=args.gpus,
-			cpus_per_task=args.cpus_per_task,
-			mem=args.mem,
-			partition=args.partition,
-			extra_analyse_args=extra_analyse_args,
-		)
-		job_name = _slurm_job_name(job.eid, job.oid)
-		if args.dry_run:
-			print(
-				f"[dry-run] {job.eid} / {job.oid} ({job.n_runs} runs) -> {script_path}"
-			)
-			continue
+    submitted: list[tuple[str, Path, str]] = []
+    for job in selected:
+        script_path = write_job_script(
+            job,
+            scripts_dir,
+            time=args.time,
+            gpus=args.gpus,
+            cpus_per_task=args.cpus_per_task,
+            mem=args.mem,
+            partition=args.partition,
+            extra_analyse_args=extra_analyse_args,
+        )
+        job_name = _slurm_job_name(job.eid, job.oid)
+        if args.dry_run:
+            print(
+                f"[dry-run] {job.eid} / {job.oid} ({job.n_runs} runs) -> {script_path}"
+            )
+            continue
 
-		job_id = submit_job(
-			script_path,
-			project_root=project_root,
-			slurm_account=slurm_account,
-			slurm_log_dir=slurm_log_dir,
-			job_name=job_name,
-		)
-		submitted.append((job_id, script_path, f"{job.eid} / {job.oid}"))
-		print(f"Submitted {job_id} ({job.eid} / {job.oid}, {job.n_runs} runs)")
+        job_id = submit_job(
+            script_path,
+            project_root=project_root,
+            slurm_account=slurm_account,
+            slurm_log_dir=slurm_log_dir,
+            job_name=job_name,
+        )
+        submitted.append((job_id, script_path, f"{job.eid} / {job.oid}"))
+        print(f"Submitted {job_id} ({job.eid} / {job.oid}, {job.n_runs} runs)")
 
-	if args.dry_run:
-		print(f"Wrote {len(selected)} script(s) to {scripts_dir}")
-		return 0
+    if args.dry_run:
+        print(f"Wrote {len(selected)} script(s) to {scripts_dir}")
+        return 0
 
-	job_ids = [job_id for job_id, _, _ in submitted]
-	print(f"Submitted {len(submitted)} job(s); logs under {slurm_log_dir}")
+    job_ids = [job_id for job_id, _, _ in submitted]
+    print(f"Submitted {len(submitted)} job(s); logs under {slurm_log_dir}")
 
-	if args.no_wait_minmax:
-		print(
-			"Skipping wait/min-max (--no-wait-minmax). Run manually after shards finish:\n"
-			f"  uv run python scripts/slurm/min_max_individual.py "
-			f"--input-dir {results_dir} --output-dir {analysis_output_dir}"
-		)
-		return 0
+    if args.no_wait_minmax:
+        print(
+            "Skipping wait/min-max (--no-wait-minmax). Run manually after shards finish:\n"
+            f"  uv run python scripts/slurm/min_max_individual.py "
+            f"--input-dir {results_dir} --output-dir {analysis_output_dir}"
+        )
+        return 0
 
-	try:
-		wait_for_slurm_jobs(job_ids)
-	except RuntimeError as exc:
-		print(exc, file=sys.stderr)
-		return 1
+    try:
+        wait_for_slurm_jobs(job_ids)
+    except RuntimeError as exc:
+        print(exc, file=sys.stderr)
+        return 1
 
-	score_factors = None
-	if args.score_factors is not None:
-		score_factors = _parse_score_factors(args.score_factors)
+    score_factors = None
+    if args.score_factors is not None:
+        score_factors = _parse_score_factors(args.score_factors)
 
-	print("Running global robustness min-max normalization...")
-	rc = run_minmax(
-		input_dir=results_dir,
-		output_dir=analysis_output_dir,
-		score_factors=score_factors or dict(DEFAULT_SCORE_FACTORS),
-		require_all=True,
-	)
-	return rc
+    print("Running global robustness min-max normalization...")
+    rc = run_minmax(
+        input_dir=results_dir,
+        output_dir=analysis_output_dir,
+        score_factors=score_factors or dict(DEFAULT_SCORE_FACTORS),
+        require_all=True,
+    )
+    return rc
 
 
 if __name__ == "__main__":
-	raise SystemExit(main())
+    raise SystemExit(main())

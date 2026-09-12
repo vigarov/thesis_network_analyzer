@@ -7,13 +7,13 @@ RESULTS = _PROJECT / "results"
 
 
 def set_results_root(path: Path | str) -> None:
-	"""Point analysis I/O at simulation outputs (default: ``<project>/results``)."""
-	global RESULTS
-	RESULTS = Path(path).resolve()
+    """Point analysis I/O at simulation outputs (default: `<project>/results`)."""
+    global RESULTS
+    RESULTS = Path(path).resolve()
 
 
 if str(_PROJECT) not in sys.path:
-	sys.path.insert(0, str(_PROJECT))
+    sys.path.insert(0, str(_PROJECT))
 
 # Eval batch for MNIST-style experiments: 10 digits × 5 samples (see experiments/mnist/base.py).
 _NETWORK_N_DIGITS = 10

@@ -12,166 +12,166 @@ from pathlib import Path
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
-	sys.path.insert(0, str(_PROJECT_ROOT))
+    sys.path.insert(0, str(_PROJECT_ROOT))
 
 from analysis.final.final_analysis_config import (
-	DEFAULT_SCORE_FACTORS,
-	EXPERT_MODEL_DIR_BY_DATASET,
-	dataset_key,
+    DEFAULT_SCORE_FACTORS,
+    EXPERT_MODEL_DIR_BY_DATASET,
+    dataset_key,
 )
 from analysis.final.load_final_analysis import run_final_analysis
 from scripts.analyse_sim_results import _parse_score_factors
 
 
 def build_parser() -> argparse.ArgumentParser:
-	p = argparse.ArgumentParser(description=__doc__)
-	p.add_argument(
-		"--experiment-id",
-		type=str,
-		required=True,
-		help="Experiment directory name under --input-dir.",
-	)
-	p.add_argument(
-		"--optimizer-id",
-		type=str,
-		required=True,
-		help="Optimizer directory name under .../optimizers/.",
-	)
-	p.add_argument(
-		"--input-dir",
-		type=Path,
-		required=True,
-		help="Root directory of simulation results (experiment/run/model tree).",
-	)
-	p.add_argument(
-		"--output-dir",
-		type=Path,
-		required=True,
-		help="Directory for gzip-pickled analysis checkpoints.",
-	)
-	p.add_argument(
-		"--dataset",
-		default="mnist",
-		help="Dataset family (default: mnist). Accepts cifar / cifar10.",
-	)
-	p.add_argument(
-		"--expert-model-dir",
-		type=str,
-		default=None,
-		help=(
-			"Expert saliency checkpoints relative to project root "
-			"(!OPT → optimizer id; !ARCH → inception/resnet for CIFAR; "
-			"!SD → config.json seed, appended if omitted)."
-		),
-	)
-	p.add_argument(
-		"--n-checkpoint-samples",
-		type=int,
-		default=20,
-		help="Uniform checkpoint samples per recovery period (default: 20).",
-	)
-	p.add_argument(
-		"--score-factors",
-		type=_parse_score_factors,
-		default=None,
-		help=f"JSON object of score weights (default: {json.dumps(DEFAULT_SCORE_FACTORS)}).",
-	)
-	p.add_argument(
-		"--rescore",
-		action=argparse.BooleanOptionalAction,
-		default=True,
-		help="Recompute total_score from cached component columns when loading checkpoints.",
-	)
-	p.add_argument(
-		"--minmax-normalize-robustness",
-		action=argparse.BooleanOptionalAction,
-		default=False,
-		help=(
-			"Min-max normalize robustness_score across all runs after compute "
-			"(default: off for shard jobs; run full analyse once after all shards)."
-		),
-	)
-	p.add_argument(
-		"--reparse-digit-a",
-		action=argparse.BooleanOptionalAction,
-		default=False,
-		help="Refresh digitA on recover/reinforce cached runs from config.json.",
-	)
-	p.add_argument(
-		"--strict",
-		action=argparse.BooleanOptionalAction,
-		default=False,
-		help="Strict dead-neuron filtering when building recovery periods.",
-	)
-	p.add_argument(
-		"--btsp-start-strategy",
-		type=str,
-		default="acceleration",
-		choices=("acceleration", "trial_start"),
-		help="BTSP start point for angle / checkpoint sampling.",
-	)
-	p.add_argument(
-		"--use-real-progression",
-		action=argparse.BooleanOptionalAction,
-		default=True,
-		help="Use real progression for activation-angle computation.",
-	)
-	p.add_argument(
-		"--verbose-errors",
-		action=argparse.BooleanOptionalAction,
-		default=True,
-		help="Print full tracebacks to stderr when a run fails.",
-	)
-	return p
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument(
+        "--experiment-id",
+        type=str,
+        required=True,
+        help="Experiment directory name under --input-dir.",
+    )
+    p.add_argument(
+        "--optimizer-id",
+        type=str,
+        required=True,
+        help="Optimizer directory name under .../optimizers/.",
+    )
+    p.add_argument(
+        "--input-dir",
+        type=Path,
+        required=True,
+        help="Root directory of simulation results (experiment/run/model tree).",
+    )
+    p.add_argument(
+        "--output-dir",
+        type=Path,
+        required=True,
+        help="Directory for gzip-pickled analysis checkpoints.",
+    )
+    p.add_argument(
+        "--dataset",
+        default="mnist",
+        help="Dataset family (default: mnist). Accepts cifar / cifar10.",
+    )
+    p.add_argument(
+        "--expert-model-dir",
+        type=str,
+        default=None,
+        help=(
+            "Expert saliency checkpoints relative to project root "
+            "(!OPT → optimizer id; !ARCH → inception/resnet for CIFAR; "
+            "!SD → config.json seed, appended if omitted)."
+        ),
+    )
+    p.add_argument(
+        "--n-checkpoint-samples",
+        type=int,
+        default=20,
+        help="Uniform checkpoint samples per recovery period (default: 20).",
+    )
+    p.add_argument(
+        "--score-factors",
+        type=_parse_score_factors,
+        default=None,
+        help=f"JSON object of score weights (default: {json.dumps(DEFAULT_SCORE_FACTORS)}).",
+    )
+    p.add_argument(
+        "--rescore",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Recompute total_score from cached component columns when loading checkpoints.",
+    )
+    p.add_argument(
+        "--minmax-normalize-robustness",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Min-max normalize robustness_score across all runs after compute "
+            "(default: off for shard jobs; run full analyse once after all shards)."
+        ),
+    )
+    p.add_argument(
+        "--reparse-digit-a",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Refresh digitA on recover/reinforce cached runs from config.json.",
+    )
+    p.add_argument(
+        "--strict",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Strict dead-neuron filtering when building recovery periods.",
+    )
+    p.add_argument(
+        "--btsp-start-strategy",
+        type=str,
+        default="acceleration",
+        choices=("acceleration", "trial_start"),
+        help="BTSP start point for angle / checkpoint sampling.",
+    )
+    p.add_argument(
+        "--use-real-progression",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Use real progression for activation-angle computation.",
+    )
+    p.add_argument(
+        "--verbose-errors",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Print full tracebacks to stderr when a run fails.",
+    )
+    return p
 
 
 def main(argv: list[str] | None = None) -> int:
-	args = build_parser().parse_args(argv)
-	ds = dataset_key(args.dataset)
-	score_factors = args.score_factors if args.score_factors is not None else dict(DEFAULT_SCORE_FACTORS)
-	if args.expert_model_dir is None:
-		expert_model_dir = (
-			EXPERT_MODEL_DIR_BY_DATASET["cifar10"]
-			if ds == "cifar"
-			else EXPERT_MODEL_DIR_BY_DATASET["mnist"]
-		)
-	else:
-		expert_model_dir = args.expert_model_dir
+    args = build_parser().parse_args(argv)
+    ds = dataset_key(args.dataset)
+    score_factors = args.score_factors if args.score_factors is not None else dict(DEFAULT_SCORE_FACTORS)
+    if args.expert_model_dir is None:
+        expert_model_dir = (
+            EXPERT_MODEL_DIR_BY_DATASET["cifar10"]
+            if ds == "cifar"
+            else EXPERT_MODEL_DIR_BY_DATASET["mnist"]
+        )
+    else:
+        expert_model_dir = args.expert_model_dir
 
-	all_results, _tree, errors, _ds_key, _model_ids = run_final_analysis(
-		input_dir=args.input_dir,
-		output_dir=args.output_dir,
-		project_root=_PROJECT_ROOT,
-		expert_model_dir=expert_model_dir,
-		n_checkpoint_samples=args.n_checkpoint_samples,
-		score_factors=score_factors,
-		rescore=args.rescore,
-		minmax_normalize_robustness=args.minmax_normalize_robustness,
-		reparse_digit_a=args.reparse_digit_a,
-		strict=args.strict,
-		btsp_start_strategy=args.btsp_start_strategy,
-		use_real_progression=args.use_real_progression,
-		verbose_errors=args.verbose_errors,
-		dataset=args.dataset,
-		experiment_id=args.experiment_id,
-		optimizer_id=args.optimizer_id,
-	)
+    all_results, _tree, errors, _ds_key, _model_ids = run_final_analysis(
+        input_dir=args.input_dir,
+        output_dir=args.output_dir,
+        project_root=_PROJECT_ROOT,
+        expert_model_dir=expert_model_dir,
+        n_checkpoint_samples=args.n_checkpoint_samples,
+        score_factors=score_factors,
+        rescore=args.rescore,
+        minmax_normalize_robustness=args.minmax_normalize_robustness,
+        reparse_digit_a=args.reparse_digit_a,
+        strict=args.strict,
+        btsp_start_strategy=args.btsp_start_strategy,
+        use_real_progression=args.use_real_progression,
+        verbose_errors=args.verbose_errors,
+        dataset=args.dataset,
+        experiment_id=args.experiment_id,
+        optimizer_id=args.optimizer_id,
+    )
 
-	print(
-		f"Shard eid={args.experiment_id!r} oid={args.optimizer_id!r}: "
-		f"loaded/saved {len(all_results)} runs; {len(errors)} errors"
-	)
-	if errors:
-		import pandas as pd
+    print(
+        f"Shard eid={args.experiment_id!r} oid={args.optimizer_id!r}: "
+        f"loaded/saved {len(all_results)} runs; {len(errors)} errors"
+    )
+    if errors:
+        import pandas as pd
 
-		print(
-			pd.DataFrame(errors)
-			.drop(columns=["traceback"], errors="ignore")
-			.to_string(index=False)
-		)
-		return 1
-	return 0
+        print(
+            pd.DataFrame(errors)
+            .drop(columns=["traceback"], errors="ignore")
+            .to_string(index=False)
+        )
+        return 1
+    return 0
 
 
 if __name__ == "__main__":
-	raise SystemExit(main())
+    raise SystemExit(main())

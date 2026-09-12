@@ -21,9 +21,7 @@ from sklearn.cluster import SpectralClustering
 from sklearn.manifold import MDS
 
 
-# ========
 # 3.1 - Distance --> Neighbourhood Rank matrix
-# ========
 
 def distance_to_rank(D: np.ndarray) -> np.ndarray:
     """Convert a pairwise distance matrix to a neighbourhood-rank matrix.
@@ -45,9 +43,7 @@ def distance_to_rank(D: np.ndarray) -> np.ndarray:
     R = np.argsort(sort_order, axis=1).astype(np.float32)  # rank of each entry
     return R
 
-# ========
 # Step 3.2 - Difference matrix G_{A,B}
-# ========
 
 def compute_G(
     R_a: np.ndarray,
@@ -66,7 +62,7 @@ def compute_G(
     Parameters
     ----------
     R_a, R_b    : (N, N) rank matrices from `distance_to_rank`.
-    gamma       : Sensitivity parameter.  If *None*, set to gamma_scale / N.
+    gamma       : Sensitivity parameter.  If None, set to gamma_scale / N.
     gamma_scale : Used only when gamma is None (default 10).
 
     Returns
@@ -89,9 +85,7 @@ def compute_G(
     return np.tanh(gamma * diff / denom)
 
 
-# ========
 # 3.3 - Affinity matrix F_{A,B}  ( matrix that gets clustered)
-# ========
 
 def compute_F(G: np.ndarray, beta: float = 5.0) -> np.ndarray:
     """Compute the RDX affinity matrix F_{A,B} from the difference matrix G_{A,B}.
@@ -116,9 +110,7 @@ def compute_F(G: np.ndarray, beta: float = 5.0) -> np.ndarray:
     return F
 
 
-# ========
 # 3.4 - Spectral clustering of F_{A,B}
-# ========
 
 def cluster_F(
     F: np.ndarray,
@@ -165,9 +157,7 @@ def cluster_F(
     return labels
 
 
-# ========
 # 2-D projection for visualisation (MDS, PCoA, or a shared dispatcher)
-# ========
 
 def pca_project(
     D: np.ndarray,
@@ -177,7 +167,7 @@ def pca_project(
 
     Double-centers the squared distance matrix and takes the leading
     eigenvectors; this is the standard linear embedding used when a Euclidean
-    configuration is implied (often called *classical* MDS or PCoA).
+    configuration is implied (often called classical MDS or PCoA).
 
     Parameters
     ----------
@@ -277,9 +267,7 @@ def dim_project(
     raise ValueError("projection_mode must be 'mds' or 'pca'")
 
 
-# ========
 # Convenience wrapper - run the full pipeline in one call
-# ========
 
 def rdx(
     D_a: np.ndarray,
@@ -291,7 +279,7 @@ def rdx(
     n_clusters: int = 10,
     random_state: int = 0,
 ) -> dict:
-    """Run the full RDX pipeline for *both* directions (A-->B and B-->A).
+    """Run the full RDX pipeline for both directions (A-->B and B-->A).
 
     Given distance matrices D_a and D_b this returns the M_A matrices and
     cluster labels for both the "A explains what A has over B" direction and
@@ -348,9 +336,7 @@ def rdx(
     )
 
 
-# ========
 # Visualization helpers
-# ========
 
 
 def _axis_labels_for_projection(projection_mode: str) -> tuple[str, str]:
@@ -445,7 +431,6 @@ def plot_affinity_matrix(
     plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
 
     if labels is not None:
-        # Draw magenta lines at cluster boundaries
         sorted_labels = np.sort(labels)
         boundaries = np.where(np.diff(sorted_labels))[0] + 0.5
         for b in boundaries:
